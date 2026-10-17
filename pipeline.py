@@ -36,7 +36,7 @@ import os, subprocess, tempfile
 
 def _load_audio(path):
     try:
-        wav, _ = librosa.load(path, sr=SR, mono=True)
+        wav = _load_audio(path)
         if len(wav) > 0:
             return wav
     except Exception:
