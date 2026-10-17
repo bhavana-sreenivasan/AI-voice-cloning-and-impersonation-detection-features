@@ -32,7 +32,28 @@ def _windows(wav):
         starts.append(len(wav) - MAX_LEN)
     return [wav[s:s + MAX_LEN] for s in starts], [s / SR for s in starts]
 
+import os, subprocess, tempfile
 
+def _load_audio(path):
+    try:
+        wav, _ = librosa.load(path, sr=SR, mono=True)
+        if len(wav) > 0:
+            return wav
+    except Exception:
+        pass
+    # fallback: let ffmpeg decode and convert to 16 kHz mono WAV
+    out = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", path, "-ac", "1", "-ar", str(SR), "-t", "60", out],
+            check=True, capture_output=True,
+        )
+        wav, _ = librosa.load(out, sr=SR, mono=True)
+        return wav
+    finally:
+        if os.path.exists(out):
+            os.remove(out)
+            
 @torch.no_grad()
 def analyze(path, model, device):
     wav, _ = librosa.load(path, sr=SR, mono=True)
