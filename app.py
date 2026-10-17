@@ -56,8 +56,11 @@ try:
         else:
             st.success("Low risk: this voice looks genuine.")
         if res["alert_time"] is not None:
-            st.error("🚨 Mixed audio: real voice, then synthetic voice from about "
-            f"{res['alert_time']:.0f} s onward.")
+            if res["alert_time"] < 1:
+                st.error("🚨 The whole clip looks synthetic.")
+            else:
+                st.error("🚨 Mixed audio: real voice, then synthetic voice from about "
+                f"{res['alert_time']:.0f} s onward.")
         print("C: metrics and alerts drawn", flush=True)
 
         st.subheader("Risk over time")
@@ -81,6 +84,8 @@ try:
 
         st.caption(f"Each point is a ~4 s segment. Uncertain zone: {LOW_T:.0%}-{HIGH_T:.0%} spoof probability. "
                    f"Audio length: {res['duration']:.1f} s.")
+        st.caption("⚠️ This model is trained on speech only. Music, noise, and "
+           "heavily compressed audio can give unreliable results.")
     else:
         st.info("Upload a clip to begin.")
 except Exception as e:
