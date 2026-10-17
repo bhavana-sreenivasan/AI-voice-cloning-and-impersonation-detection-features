@@ -61,10 +61,18 @@ try:
             st.error(f"⚠️ Voice swap alert: synthetic voice detected from about {res['alert_time']:.0f} s onward.")
         st.subheader("Risk over time")
         df = pd.DataFrame(res["timeline"], columns=["time (s)", "spoof probability"]).set_index("time (s)")
-        if len(df) < 3:
-            st.bar_chart(df)
-        else:
-            st.line_chart(df)
+        st.subheader("Risk over time")
+        st.text(str(res["timeline"]))   # plain text, proves analyze() finished
+        
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(7, 3))
+        ax.plot(df.index, df["spoof probability"], marker="o")
+        ax.set_ylim(0, 1)
+        ax.set_xlabel("time (s)")
+        ax.set_ylabel("spoof probability")
+        ax.grid(alpha=0.3)
+        st.pyplot(fig)
+        plt.close(fig)
         st.caption(f"Each point is a ~4 s segment. Uncertain zone: {LOW_T:.0%}-{HIGH_T:.0%} spoof probability. "
                 f"Audio length: {res['duration']:.1f} s.")
     else:
