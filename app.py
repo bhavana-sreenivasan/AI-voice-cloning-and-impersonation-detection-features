@@ -2,6 +2,8 @@
 
 Run:  streamlit run app.py
 """
+import faulthandler, sys
+faulthandler.enable(file=sys.stderr, all_threads=True)
 import os
 import tempfile
 import pandas as pd
