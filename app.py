@@ -1,6 +1,3 @@
-import faulthandler, sys
-faulthandler.enable(file=sys.stderr, all_threads=True)
-print("0: app.py started", flush=True)
 
 import streamlit as st
 try:
@@ -22,7 +19,10 @@ try:
     model, device = get_model()
     print("1: model ready", flush=True)
 
-    uploaded = st.file_uploader("Upload an audio clip (wav / flac)", type=["wav", "flac"])
+    uploaded = st.file_uploader(
+    "Upload an audio clip",
+    type=["wav", "flac", "mp3", "m4a", "ogg", "opus", "aac", "amr", "webm", "mp4"],
+)
 
     if uploaded is not None:
         print("A: file received", uploaded.name, uploaded.size, flush=True)
