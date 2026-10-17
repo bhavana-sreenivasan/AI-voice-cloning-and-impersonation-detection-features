@@ -1,15 +1,12 @@
-"""Streamlit demo: upload audio -> Real/Fake + confidence + risk level.
+import faulthandler, sys
+faulthandler.enable(file=sys.stderr, all_threads=True)
+print("0: app.py started", flush=True)
 
-Run:  streamlit run app.py
-"""
 import streamlit as st
 try:
-    
-
     import os
     import tempfile
     import pandas as pd
-    import streamlit as st
 
     from pipeline import analyze, LOW_T, HIGH_T
     from spoof import load_model
@@ -18,17 +15,17 @@ try:
     st.title("🎙️ AI Voice Clone & Impersonation Detector")
     st.caption("Prototype: pretrained AASIST anti-spoofing model (CPU)")
 
-
     @st.cache_resource
     def get_model():
         return load_model()
 
-
     model, device = get_model()
+    print("1: model ready", flush=True)
 
     uploaded = st.file_uploader("Upload an audio clip (wav / flac)", type=["wav", "flac"])
 
     if uploaded is not None:
+        print("A: file received", uploaded.name, uploaded.size, flush=True)
         st.audio(uploaded)
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded.name)[1]) as tmp:
             tmp.write(uploaded.getbuffer())
@@ -42,6 +39,7 @@ try:
             st.stop()
         finally:
             os.remove(tmp_path)
+        print("B: analyze done", res["duration"], len(res["timeline"]), flush=True)
 
         risk = res["risk"]
         icon = {"Low": "🟢", "Uncertain": "🟡", "High": "🔴"}[risk]
@@ -59,12 +57,17 @@ try:
             st.success("Low risk: this voice looks genuine.")
         if res["alert_time"] is not None:
             st.error(f"⚠️ Voice swap alert: synthetic voice detected from about {res['alert_time']:.0f} s onward.")
+        print("C: metrics and alerts drawn", flush=True)
+
         st.subheader("Risk over time")
         df = pd.DataFrame(res["timeline"], columns=["time (s)", "spoof probability"]).set_index("time (s)")
-        st.subheader("Risk over time")
-        st.text(str(res["timeline"]))   # plain text, proves analyze() finished
-        
+        print("D: dataframe built", flush=True)
+
+        import matplotlib
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        print("E: matplotlib imported", flush=True)
+
         fig, ax = plt.subplots(figsize=(7, 3))
         ax.plot(df.index, df["spoof probability"], marker="o")
         ax.set_ylim(0, 1)
@@ -73,9 +76,11 @@ try:
         ax.grid(alpha=0.3)
         st.pyplot(fig)
         plt.close(fig)
+        print("F: chart drawn", flush=True)
+
         st.caption(f"Each point is a ~4 s segment. Uncertain zone: {LOW_T:.0%}-{HIGH_T:.0%} spoof probability. "
-                f"Audio length: {res['duration']:.1f} s.")
+                   f"Audio length: {res['duration']:.1f} s.")
     else:
-        st.info("Upload a clip to begin. Tip: use samples from your eval subset in data\\LA\\ASVspoof2019_LA_eval\\flac.")
+        st.info("Upload a clip to begin.")
 except Exception as e:
     st.exception(e)
