@@ -5,11 +5,15 @@ import librosa
 
 from spoof import load_model, _pad, SR, MAX_LEN
 
+torch.set_num_threads(2)  # keep CPU/memory use modest on small cloud machines
+
 # Risk thresholds on spoof probability. Tune these using your eval scores.
 LOW_T = 0.30   # below this -> Low risk
 HIGH_T = 0.70  # above this -> High risk; in between -> Uncertain
 
-HOP = SR  # 1 second hop between 4 s windows
+HOP = SR           # 1 second hop between 4 s windows
+BATCH = 1          # one window at a time: low peak memory on Streamlit Cloud
+MAX_SECONDS = 60   # cap very long uploads so one file can't crash the app
 
 
 def risk_level(p_spoof):
@@ -34,11 +38,13 @@ def analyze(path, model, device):
     wav, _ = librosa.load(path, sr=SR, mono=True)
     if len(wav) < SR // 2:
         raise ValueError("Audio too short (need at least 0.5 seconds).")
+    if len(wav) > MAX_SECONDS * SR:
+        wav = wav[:MAX_SECONDS * SR]
 
     wins, starts = _windows(wav)
     probs = []
-    for i in range(0, len(wins), 16):  # batches of 16 to keep memory low
-        batch = torch.tensor(np.stack(wins[i:i + 16]), dtype=torch.float32).to(device)
+    for i in range(0, len(wins), BATCH):
+        batch = torch.tensor(np.stack(wins[i:i + BATCH]), dtype=torch.float32).to(device)
         _, out = model(batch)
         probs.extend(torch.softmax(out, dim=1)[:, 0].cpu().numpy().tolist())
 
