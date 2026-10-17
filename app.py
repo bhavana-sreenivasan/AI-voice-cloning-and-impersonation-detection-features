@@ -56,7 +56,8 @@ try:
         else:
             st.success("Low risk: this voice looks genuine.")
         if res["alert_time"] is not None:
-            st.error(f"⚠️ Voice swap alert: synthetic voice detected from about {res['alert_time']:.0f} s onward.")
+            st.error("🚨 Mixed audio: real voice, then synthetic voice from about "
+            f"{res['alert_time']:.0f} s onward.")
         print("C: metrics and alerts drawn", flush=True)
 
         st.subheader("Risk over time")
