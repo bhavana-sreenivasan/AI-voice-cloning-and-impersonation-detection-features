@@ -1,0 +1,6 @@
+data/
+venv/
+__pycache__/
+ecapa_model/
+*.zip
+long_demo.wav
