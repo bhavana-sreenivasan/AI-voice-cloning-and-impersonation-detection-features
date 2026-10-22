@@ -37,10 +37,19 @@ def analyze(path, model, device):
 
     wins, starts = _windows(wav)
     probs = []
-    for i in range(0, len(wins), 16):  # batches of 16 to keep memory low
-        batch = torch.tensor(np.stack(wins[i:i + 16]), dtype=torch.float32).to(device)
+    
+    for i in range(0, len(wins), 1):
+        batch = torch.tensor(
+            np.stack(wins[i:i + 1]),
+            dtype=torch.float32
+        ).to(device)
+    
         _, out = model(batch)
-        probs.extend(torch.softmax(out, dim=1)[:, 0].cpu().numpy().tolist())
+        probs.extend(
+            torch.softmax(out, dim=1)[:, 0].cpu().numpy().tolist()
+        )
+
+        
 
     p_spoof = float(np.mean(probs))
     alert_time = None
