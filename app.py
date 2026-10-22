@@ -4,7 +4,7 @@ Run:  streamlit run app.py
 """
 import os
 import tempfile
-
+import traceback
 import pandas as pd
 import streamlit as st
 
@@ -58,6 +58,7 @@ try:
                 st.warning("Speaker check skipped: run `pip install speechbrain` to enable it.")
 except Exception as e:
     st.error(f"Could not analyze this file: {e}")
+    st.code(traceback.format_exc())
     st.stop()
 finally:
     os.remove(tmp_path)
