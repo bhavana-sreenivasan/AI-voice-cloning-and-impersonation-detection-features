@@ -15,7 +15,7 @@ st.set_page_config(page_title="AI Voice Clone Detector", page_icon="🎙️", la
 st.title(" AI Voice Clone & Impersonation Detector")
 st.caption("Prototype: pretrained AASIST anti-spoofing model + ECAPA-TDNN speaker verification (CPU)")
 
-AUDIO_TYPES = ["wav", "flac"]
+AUDIO_TYPES = [ "wav", "flac", "mp3", "m4a", "ogg", "aac", "opus"]
 
 
 @st.cache_resource
