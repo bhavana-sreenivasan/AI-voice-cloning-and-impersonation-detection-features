@@ -5,7 +5,11 @@ numpy==2.4.4
 scipy==1.17.1
 soundfile==0.14.0
 torch==2.14.1
-matplotlib
-ffmpeg
-speechbrain
 streamlit
+pandas
+scikit-learn
+tqdm
+speechbrain
+streamlit-webrtc
+faster-whisper
+reportlab

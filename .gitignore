@@ -4,3 +4,5 @@ __pycache__/
 ecapa_model/
 *.zip
 long_demo.wav
+voice_store/
+calls.db
