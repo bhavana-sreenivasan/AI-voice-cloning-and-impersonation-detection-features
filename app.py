@@ -12,7 +12,7 @@ from pipeline import analyze, fuse_risk, LOW_T, HIGH_T
 from spoof import load_model
 
 st.set_page_config(page_title="AI Voice Clone Detector", page_icon="🎙️", layout="centered")
-st.title("🎙️ AI Voice Clone & Impersonation Detector")
+st.title(" AI Voice Clone & Impersonation Detector")
 st.caption("Prototype: pretrained AASIST anti-spoofing model + ECAPA-TDNN speaker verification (CPU)")
 
 AUDIO_TYPES = ["wav", "flac"]
