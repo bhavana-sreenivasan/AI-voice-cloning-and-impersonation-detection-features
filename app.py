@@ -18,8 +18,8 @@ import voice_store
 from pipeline import fuse_risk, LOW_T, HIGH_T
 from shared import run_checks
 
-st.set_page_config(page_title="AI Voice Clone Detector", page_icon="🎙️", layout="centered")
-st.title("🎙️ AI Voice Clone & Impersonation Detector")
+st.set_page_config(page_title="AI Voice Clone Detector", layout="centered")
+st.title(" AI Voice Clone & Impersonation Detector")
 st.caption("Prototype: pretrained AASIST anti-spoofing + ECAPA-TDNN speaker verification (CPU)")
 
 AUDIO_TYPES = ["wav", "flac", "mp3", "m4a", "ogg"]
