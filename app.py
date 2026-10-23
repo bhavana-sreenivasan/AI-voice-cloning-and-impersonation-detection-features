@@ -5,6 +5,7 @@ Uncertain results trigger a challenge-response verification step.
 Run:  streamlit run app.py        (other pages: Live monitor, Call log)
 """
 import hashlib
+import html
 import os
 import tempfile
 
