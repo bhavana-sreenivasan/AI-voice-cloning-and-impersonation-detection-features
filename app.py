@@ -124,18 +124,25 @@ with st.container(border=True):
     st.caption(f"Logged as call #{call_id} · {phone}")
 
 # --- 2. Key numbers --------------------------------------------------------
+def card(label, value, sub=""):
+    st.caption(label)
+    st.markdown(
+        f"<div style='font-size:1.6rem;font-weight:600;line-height:1.25;"
+        f"word-break:break-word'>{html.escape(str(value))}</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(sub or "\u00a0")
 m1, m2, m3 = st.columns(3)
 with m1.container(border=True):
-    st.metric("Authenticity", res["label"], f"{res['confidence']:.0%} confidence", delta_color="off")
+    card("Authenticity", res["label"], f"{res['confidence']:.0%} confidence")
 with m2.container(border=True):
     if ident:
-        st.metric("Closest saved voice", best_name,
-                  f"{ident['decision'].capitalize()} · {ident['score']:.2f}", delta_color="off")
+        card("Closest saved voice", best_name,
+             f"{ident['decision'].capitalize()} · {ident['score']:.2f}")
     else:
-        st.metric("Closest saved voice", "—")
+        card("Closest saved voice", "—", "No saved voices yet")
 with m3.container(border=True):
-    st.metric("Suspicious audio", f"{res['frac_suspicious']:.0%}",
-              f"of {res['duration']:.0f} s clip", delta_color="off")
+    card("Suspicious audio", f"{res['frac_suspicious']:.0%}", f"of {res['duration']:.0f} s clip")
 
 # --- 3. Additional verification (only for borderline results) --------------
 if base_risk == "Uncertain":
