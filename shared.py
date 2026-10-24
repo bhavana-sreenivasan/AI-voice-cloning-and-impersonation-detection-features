@@ -37,22 +37,31 @@ def split_call(data_hash, data, ext):
         os.remove(path)
     return {f"Speaker {chr(65 + i)}": (diarize.to_wav_bytes(p), len(p) / diarize.SR)
             for i, p in enumerate(parts)}
-def run_checks(data_hash, data, ext, targets, lib_keys):
-    """Spoof check + identity check against each target speaker. Cached per file + library state."""
+@st.cache_data(show_spinner=False)
+def run_checks(data_hash, data, ext, targets, lib_keys, id_data=None, id_ext=".wav"):
+    """Spoof check on the full recording; identity check on id_data (isolated voice) if given."""
     model, device = get_model()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        tmp.write(data)
-        path = tmp.name
+    paths = []
+
+    def _write(b, e):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=e) as tmp:
+            tmp.write(b)
+        paths.append(tmp.name)
+        return tmp.name
+
     idents, speaker_missing = {}, False
     try:
+        path = _write(data, ext)
+        id_path = _write(id_data, id_ext) if id_data is not None else path
         res = analyze(path, model, device)
         if targets:
             try:
                 import speaker
                 for name in targets:
-                    idents[name] = speaker.verify_clip(path, get_ref(name, lib_keys[name]))
+                    idents[name] = speaker.verify_clip(id_path, get_ref(name, lib_keys[name]))
             except ImportError:
                 speaker_missing = True
     finally:
-        os.remove(path)
+        for p in paths:
+            os.remove(p)
     return res, idents, speaker_missing
