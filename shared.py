@@ -22,6 +22,18 @@ def get_ref(name, _key):
 
 
 @st.cache_data(show_spinner=False)
+def split_call(data_hash, data, ext):
+    """-> {'Speaker A': (wav_bytes, seconds), ...} longest speaker first."""
+    import diarize
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(data)
+        path = tmp.name
+    try:
+        parts = diarize.split(path)
+    finally:
+        os.remove(path)
+    return {f"Speaker {chr(65 + i)}": (diarize.to_wav_bytes(p), len(p) / diarize.SR)
+            for i, p in enumerate(parts)}
 def run_checks(data_hash, data, ext, targets, lib_keys):
     """Spoof check + identity check against each target speaker. Cached per file + library state."""
     model, device = get_model()
