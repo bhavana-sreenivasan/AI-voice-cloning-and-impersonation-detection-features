@@ -17,8 +17,7 @@ import challenge
 import report_panel
 import voice_store
 from pipeline import fuse_risk, LOW_T, HIGH_T
-from shared import run_checks
-
+from shared import run_checks, split_call
 st.set_page_config(page_title="AI Voice Clone Detector", layout="centered")
 st.title(" AI Voice Clone & Impersonation Detector")
 st.caption("Prototype: pretrained AASIST anti-spoofing + ECAPA-TDNN speaker verification (CPU)")
@@ -76,9 +75,29 @@ targets = tuple(speakers) if claimed == AUTO else (claimed,)
 lib_keys = {s: voice_store.library_key(s) for s in targets}
 
 st.audio(data)
+call_mode = st.radio("Recording type", ["Phone call (2+ speakers)", "Single speaker"], horizontal=True)
+a_data, a_hash, a_ext = data, data_hash, ext      # what actually gets analysed
+if call_mode.startswith("Phone"):
+    try:
+        with st.spinner("Separating speakers..."):
+            voices = split_call(data_hash, data, ext)
+    except Exception as e:
+        st.error(f"Could not separate speakers: {e}")
+        st.stop()
+    names = list(voices)
+    who = names[0]
+    if len(names) > 1:
+        who = st.radio("Which voice is the caller?", names, horizontal=True,
+                       format_func=lambda k: f"{k} ({voices[k][1]:.0f} s of speech)")
+        with st.expander("Listen to each separated voice"):
+            for k in names:
+                st.caption(k)
+                st.audio(voices[k][0])
+    a_data, a_hash, a_ext = voices[who][0], f"{data_hash}:{who}", ".wav"
+
 try:
     with st.spinner("Analyzing..."):
-        res, idents, speaker_missing = run_checks(data_hash, data, ext, targets, lib_keys)
+        res, idents, speaker_missing = run_checks(a_hash, a_data, a_ext, targets, lib_keys)
 except Exception as e:
     st.error(f"Could not analyze this file: {e}")
     st.stop()
