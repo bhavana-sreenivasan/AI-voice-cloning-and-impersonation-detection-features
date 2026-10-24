@@ -22,6 +22,9 @@ def get_ref(name, _key):
 
 
 @st.cache_data(show_spinner=False)
+def to_wav_cached(data_hash, data, ext):
+    import audio_io
+    return audio_io.to_wav(data, ext)
 def split_call(data_hash, data, ext):
     """-> {'Speaker A': (wav_bytes, seconds), ...} longest speaker first."""
     import diarize
