@@ -72,7 +72,7 @@ data = uploaded.getvalue()
 data_hash = hashlib.sha1(data).hexdigest()      # hash of the ORIGINAL upload
 ext = os.path.splitext(uploaded.name)[1] or ".wav"
 try:
-    data, ext = audio_io.to_wav(data, ext)       # <- new: everything below now sees WAV
+    data, ext = to_wav_cached(data_hash, data, ext)     # <- new: everything below now sees WAV
 except ValueError as e:
     st.error(str(e))
     st.stop()
