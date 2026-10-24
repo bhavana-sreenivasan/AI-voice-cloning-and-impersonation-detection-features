@@ -17,7 +17,7 @@ import challenge
 import report_panel
 import voice_store
 from pipeline import fuse_risk, LOW_T, HIGH_T
-from shared import run_checks, split_call
+from shared import run_checks, split_call, to_wav_cached
 st.set_page_config(page_title="AI Voice Clone Detector", layout="centered")
 st.title(" AI Voice Clone & Impersonation Detector")
 st.caption("Prototype: pretrained AASIST anti-spoofing + ECAPA-TDNN speaker verification (CPU)")
