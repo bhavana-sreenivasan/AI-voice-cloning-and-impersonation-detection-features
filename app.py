@@ -270,7 +270,7 @@ with tab_save:
                     st.error("Consent is required.")
                 else:
                     try:
-                        voice_store.add_clip(name, data, ext)
+                        voice_store.add_clip(name, a_data, a_ext)
                         st.toast(f"Saved to {name}")
                         st.rerun()
                     except ValueError as e:
