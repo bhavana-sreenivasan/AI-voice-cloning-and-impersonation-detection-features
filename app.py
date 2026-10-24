@@ -22,7 +22,7 @@ st.set_page_config(page_title="AI Voice Clone Detector", layout="centered")
 st.title(" AI Voice Clone & Impersonation Detector")
 st.caption("Prototype: pretrained AASIST anti-spoofing + ECAPA-TDNN speaker verification (CPU)")
 
-AUDIO_TYPES = ["wav", "flac", "mp3", "m4a", "ogg"]
+AUDIO_TYPES = ["wav", "flac", "mp3", "m4a", "aac", "ogg"]
 AUTO = "Auto (compare with everyone)"
 icon = {"Low": "🟢", "Uncertain": "🟡", "High": "🔴"}
 ss = st.session_state
@@ -69,8 +69,14 @@ if uploaded is None:
     st.stop()
 
 data = uploaded.getvalue()
-data_hash = hashlib.sha1(data).hexdigest()
+data_hash = hashlib.sha1(data).hexdigest()      # hash of the ORIGINAL upload
 ext = os.path.splitext(uploaded.name)[1] or ".wav"
+try:
+    data, ext = audio_io.to_wav(data, ext)       # <- new: everything below now sees WAV
+except ValueError as e:
+    st.error(str(e))
+    st.stop()
+
 targets = tuple(speakers) if claimed == AUTO else (claimed,)
 lib_keys = {s: voice_store.library_key(s) for s in targets}
 
