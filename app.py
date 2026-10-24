@@ -82,7 +82,7 @@ lib_keys = {s: voice_store.library_key(s) for s in targets}
 
 st.audio(data)
 call_mode = st.radio("Recording type", ["Phone call (2+ speakers)", "Single speaker"], horizontal=True)
-a_data, a_hash, a_ext = data, data_hash, ext      # what actually gets analysed
+a_data, a_ext = data, ext          # voice used for identity + saving
 if call_mode.startswith("Phone"):
     try:
         with st.spinner("Separating speakers..."):
@@ -99,11 +99,11 @@ if call_mode.startswith("Phone"):
             for k in names:
                 st.caption(k)
                 st.audio(voices[k][0])
-    a_data, a_hash, a_ext = voices[who][0], f"{data_hash}:{who}", ".wav"
+    a_data, a_ext = voices[who][0], ".wav"
 
 try:
     with st.spinner("Analyzing..."):
-        res, idents, speaker_missing = run_checks(a_hash, a_data, a_ext, targets, lib_keys)
+        res, idents, speaker_missing = run_checks(data_hash, data, ext, targets, lib_keys, a_data, a_ext)
 except Exception as e:
     st.error(f"Could not analyze this file: {e}")
     st.stop()
