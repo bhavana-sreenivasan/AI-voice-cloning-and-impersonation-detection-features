@@ -1,7 +1,8 @@
-"""Evaluate pretrained AASIST on a random subset of ASVspoof 2019 LA eval set.
+"""Evaluate AASIST or SSL-AASIST on a random subset of ASVspoof 2019 LA eval set.
 
 Usage:
-    python eval.py --root /path/to/LA --n 500
+    python eval.py --root /path/to/LA --n 500                 # AASIST (default)
+    python eval.py --root /path/to/LA --n 500 --model ssl     # SSL-AASIST (needs the Python 3.9 / fairseq env)
 
 Expected layout (standard ASVspoof 2019 LA download):
     LA/ASVspoof2019_LA_eval/flac/*.flac
@@ -14,8 +15,6 @@ import random
 import numpy as np
 from sklearn.metrics import roc_curve
 from tqdm import tqdm
-
-from spoof import load_model, spoof_scores
 
 
 def compute_eer(labels, scores):
@@ -31,7 +30,15 @@ def main():
     ap.add_argument("--root", required=True, help="path to the LA folder")
     ap.add_argument("--n", type=int, default=500, help="subset size")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--model", choices=["aasist", "ssl"], default="aasist",
+                    help="aasist = pretrained AASIST; ssl = SSL-AASIST (wav2vec2 XLS-R + AASIST)")
     args = ap.parse_args()
+
+    # Import lazily so the AASIST run never needs fairseq, and the SSL run never needs the aasist/ folder.
+    if args.model == "ssl":
+        from spoof_ssl import load_model, spoof_scores
+    else:
+        from spoof import load_model, spoof_scores
 
     proto = os.path.join(args.root, "ASVspoof2019_LA_cm_protocols",
                          "ASVspoof2019.LA.cm.eval.trl.txt")
@@ -42,6 +49,7 @@ def main():
     random.Random(args.seed).shuffle(rows)
     rows = rows[: args.n]
 
+    print(f"Model: {args.model}")
     model, device = load_model()
     labels, scores, attacks = [], [], []
     for r in tqdm(rows):
