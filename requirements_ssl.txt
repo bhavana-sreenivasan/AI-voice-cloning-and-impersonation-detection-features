@@ -1,0 +1,14 @@
+# SSL-AASIST environment. Use Python 3.9, in a separate venv from the main app.
+# Install order matters:
+#   1) pip install "pip<24.1" "setuptools<66" wheel
+#   2) pip install numpy==1.23.5 cython
+#   3) pip install -r requirements-ssl.txt
+#   4) install fairseq at commit a54021305d6b3c4c5959ac9395135f63202db8f1:
+#      pip install --no-build-isolation --editable ./   (inside the fairseq folder)
+torch==2.0.1
+torchaudio==2.0.2
+numpy==1.23.5
+librosa==0.10.1
+soundfile
+scikit-learn
+tqdm
