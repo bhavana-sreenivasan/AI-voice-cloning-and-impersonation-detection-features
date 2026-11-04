@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS calls (
     notes TEXT DEFAULT '',
     reported INTEGER DEFAULT 0,
     report_ref TEXT DEFAULT '',
-    embedding TEXT
+    embedding TEXT,
+    emb_model TEXT
 )
 """
 
@@ -44,6 +45,14 @@ def _conn():
         c.execute("ALTER TABLE calls ADD COLUMN embedding TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Migration: tag which speaker model made each embedding. Embeddings from different models
+    # (e.g. ECAPA-TDNN vs ECAPA2) are both 192-d but NOT comparable, so rows without a tag
+    # (made before this column existed) are treated as 'speechbrain' and never matched against ECAPA2.
+    try:
+        c.execute("ALTER TABLE calls ADD COLUMN emb_model TEXT")
+        c.execute("UPDATE calls SET emb_model='speechbrain' WHERE embedding IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
     return c
 
 
@@ -58,26 +67,30 @@ def normalize_number(raw):
 
 def log_call(phone, source, risk, label=None, p_spoof=None, identity_name=None, identity_score=None,
              identity_decision=None, reason="", audio_sha1="", verification=None, notes="",
-             embedding=None):
-    """Insert one analysed call. `embedding` is an optional 1-D speaker embedding (numpy array/list)."""
+             embedding=None, emb_model=None):
+    """Insert one analysed call. `embedding` is an optional 1-D speaker embedding (numpy array/list);
+    pass `emb_model=speaker.EMB_MODEL` with it so it is only ever compared with the same model's embeddings."""
     emb_json = None
     if embedding is not None:
         emb_json = json.dumps([float(x) for x in np.asarray(embedding, dtype=float).ravel()])
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO calls (ts, phone, source, risk, label, p_spoof, identity_name, identity_score,"
-            " identity_decision, reason, audio_sha1, verification, notes, embedding)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " identity_decision, reason, audio_sha1, verification, notes, embedding, emb_model)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), phone, source, risk, label, p_spoof, identity_name, identity_score,
-             identity_decision, reason, audio_sha1, verification, notes, emb_json))
+             identity_decision, reason, audio_sha1, verification, notes, emb_json,
+             emb_model if embedding is not None else None))
         return cur.lastrowid
 
 
-def similar_calls(emb, threshold=0.6, limit=5, exclude_id=None):
+def similar_calls(emb, threshold=0.6, limit=5, exclude_id=None, emb_model=None):
     """Past calls whose speaker embedding is close to `emb` (cosine similarity >= threshold).
 
     Call this BEFORE log_call for the current clip (or pass exclude_id) so a call can't match itself.
     Returns a list of (similarity, call_id, phone, risk), best match first.
+    If `emb_model` is given, only embeddings made by that model are considered (the 0.6 default is
+    not calibrated for ECAPA2 either).
     """
     emb = np.asarray(emb, dtype=float).ravel()
     emb_norm = np.linalg.norm(emb)
@@ -85,7 +98,9 @@ def similar_calls(emb, threshold=0.6, limit=5, exclude_id=None):
         return []
     out = []
     with _conn() as c:
-        for r in c.execute("SELECT id, phone, risk, embedding FROM calls WHERE embedding IS NOT NULL"):
+        for r in c.execute("SELECT id, phone, risk, embedding, emb_model FROM calls WHERE embedding IS NOT NULL"):
+            if emb_model is not None and r["emb_model"] != emb_model:
+                continue
             if exclude_id is not None and r["id"] == exclude_id:
                 continue
             e = np.array(json.loads(r["embedding"]), dtype=float)

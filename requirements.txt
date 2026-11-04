@@ -9,7 +9,9 @@ streamlit
 pandas
 scikit-learn
 tqdm
-speechbrain
+huggingface_hub
+soundcard
+# speechbrain   # only for SPEAKER_BACKEND=speechbrain (old ECAPA-TDNN, A/B comparison)
 streamlit-webrtc
 faster-whisper
 reportlab

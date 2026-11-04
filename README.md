@@ -59,6 +59,13 @@ Raw outputs are in [`results/`](results/). AASIST was first run on a laptop CPU 
 ├── shared.py              # run_checks, split_call, audio conversion to WAV
 ├── spoof.py               # AASIST model loading and inference
 ├── spoof_ssl.py           # SSL-AASIST model loading and inference
+├── detectors.py           # one loader for both anti-spoofing models (SPOOF_MODEL)
+├── live.py                # rolling-window live analyzer, speech gate, session voice tracker
+├── capture.py             # remote-only audio sources (loopback, file/array, mu-law)
+├── live_session.py        # capture + analysis threads with drop-oldest backpressure
+├── live_cli.py            # terminal live monitor
+├── calibrate_speaker.py   # EER + threshold suggestion for the speaker model
+├── tests/                 # numpy-only tests of the live logic
 ├── voice_store.py         # saved voice library (ECAPA-TDNN embeddings)
 ├── challenge.py           # random phrase, speech-to-text, challenge decision
 ├── call_log.py            # call log with caller numbers
@@ -117,6 +124,40 @@ The SSL-AASIST weights are large (about 1.2 GB each) and are **not** in this rep
    - `xlsr2_300m.pt`, the XLS-R 300M base model: <https://dl.fbaipublicfiles.com/fairseq/wav2vec/xlsr2_300m.pt>
    - the pretrained SSL-AASIST weights (`LA_model.pth`): link in the README of the original repo, <https://github.com/TakHemlata/SSL_Anti-spoofing>
 
+## Live call analysis (remote party only)
+
+Only the *other* party's audio is analysed. The simplest reliable way is to never record your own
+microphone:
+
+| Situation | Source | Notes |
+| --------- | ------ | ----- |
+| Desktop call (Zoom, Meet, Teams, WhatsApp Desktop, softphone) | `LoopbackSource` (what the computer plays) | Send the call app's output to a virtual device (VB-Cable / BlackHole) so music and notification sounds are not captured. |
+| Telephony platform you control (e.g. Twilio Media Streams) | the `inbound_track` stream + `mulaw_decode` + `resample_to_16k` | Remote caller only, 8 kHz mu-law, so the models see real phone-quality audio. |
+| Stereo call recording | `ArraySource.from_file(path, channel=0 or 1)` | Pick the channel that holds the remote side. Also the way to test without a real call. |
+| Normal mobile phone call | not possible from an app | Android blocks call-audio capture for third-party apps and iOS has no API. |
+
+```
+python live_cli.py --file call.wav --channel 0 --detector aasist     # paced like a real call
+python live_cli.py --loopback --detector ssl
+python -m pytest tests -q                                            # numpy-only tests of the live logic
+```
+
+Pipeline: capture (100 ms chunks) -> speech gate (silence is never scored) -> rolling 4 s window,
+scored every `--hop` seconds -> median smoothing -> alert after 3 consecutive high scores. A
+session voice tracker (ECAPA2) enrols the remote voice from the first 8 s of speech and flags a
+mid-call change of speaker. If scoring is slower than real time, old audio is dropped (counted) so
+the monitor never lags behind the call.
+
+## Choosing the models
+
+`SPOOF_MODEL=aasist|ssl` selects the anti-spoofing model, `SPEAKER_BACKEND=ecapa2|speechbrain` the
+speaker model. After switching speaker models, re-run `calibrate_speaker.py` and export the printed
+`SPEAKER_MATCH_T` / `SPEAKER_MARGIN`; the diarization constant `SAME_SPEAKER_COS` in `diarize.py`
+was also tuned for ECAPA-TDNN. Saved voice clips are re-embedded automatically; stored call
+embeddings are tagged with their model and never compared across models.
+
+**License:** the ECAPA2 weights (`Jenthe/ECAPA2`) are CC-BY-NC-4.0, i.e. non-commercial.
+
 ## Run the dashboard
 
 ```
@@ -160,11 +201,12 @@ Done:
 
 Planned but **not yet implemented**:
 
-- [ ] Use SSL-AASIST in the dashboard / pipeline
-- [ ] Replace ECAPA-TDNN with ECAPA2 for speaker verification
+- [x] Use SSL-AASIST in the pipeline (`SPOOF_MODEL=ssl`; needs the fairseq environment, see below)
+- [x] Replace ECAPA-TDNN with ECAPA2 for speaker verification (thresholds still need calibrating: `calibrate_speaker.py`)
+- [x] Real-time streaming core for the remote party's audio (`live.py`, `capture.py`, `live_session.py`, `live_cli.py`); not yet validated on real calls or phone-codec audio
 - [ ] Remote-speaker isolation: enrol the user's own voice so the app automatically ignores it and analyses only the other party
 - [ ] Robustness testing on phone-call quality audio (G.711 / AMR / Opus codecs, noise) for both models
-- [ ] Real-time streaming analysis of a live call with live alerts
+- [ ] Live alerts in the Streamlit UI (the terminal monitor `live_cli.py` works)
 - [ ] Explainability (spectrogram / Grad-CAM highlighting of suspicious regions)
 - [ ] Cross-generator testing on unseen TTS / cloning tools (e.g. In-the-Wild)
 - [ ] Human voice imitation (mimicry) detection

@@ -6,5 +6,7 @@ ecapa_model/
 long_demo.wav
 voice_store/
 calls.db
+ssl_aasist/*.pt
+ssl_aasist/*.pth
 SSL_AASIST/*.pt
 SSL_AASIST/*.pth

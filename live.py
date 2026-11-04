@@ -1,10 +1,22 @@
-"""Rolling-window live analysis. Feed audio chunks with push(); get one event per hop.
+"""Rolling-window live analysis of ONE audio stream (the remote party's).
 
-The scoring functions are injected, so this file has no torch/streamlit dependency:
+Feed audio chunks with push(); get events back. Pure numpy: scoring functions are injected,
+so this file has no torch / streamlit dependency and can be unit-tested with fake scorers.
+
     score_fn(window: np.ndarray) -> spoof probability (0..1)
-    ident_fn(window: np.ndarray) -> similarity to the claimed voice (optional)
+    ident_fn(window: np.ndarray) -> similarity to a reference voice, or None (optional)
+
+New in this version (all optional, defaults keep the old behaviour):
+  * gate=EnergyVAD(): only SPEECH samples enter the scoring buffer. On a remote-only stream the
+    other side is silent whenever you talk; scoring silence/noise gives meaningless spoof scores.
+  * smooth=k: median of the last k window scores before thresholding (kills single-window spikes).
+  * If pushes arrive faster than the model can score, the analyzer scores the newest window once
+    and skips the missed hops instead of re-scoring the same audio (real-time catch-up).
+  * SessionVoiceTracker: enrols the remote voice from its first seconds of speech, then flags a
+    mid-call change of speaker (voice swap) without needing any saved voice.
 """
 import time
+from collections import deque
 
 import numpy as np
 
@@ -15,44 +27,120 @@ def risk_level(p, low=0.30, high=0.70):
     return "Low" if p < low else "High" if p > high else "Uncertain"
 
 
+class EnergyVAD:
+    """Dependency-free energy VAD with an adaptive noise floor and a hangover.
+
+    Good enough to drop silence on a clean remote stream. On noisy phone audio replace it with a
+    neural VAD (e.g. Silero) exposing the same .process(samples) -> speech_samples interface.
+    """
+
+    def __init__(self, sr=SR, frame_ms=20, hang_ms=300, margin_db=10.0, floor_db=-55.0):
+        self.fr = int(sr * frame_ms / 1000)
+        self.hang_frames = max(1, int(hang_ms / frame_ms))
+        self.margin_db, self.floor_db = margin_db, floor_db
+        self.noise_db = floor_db
+        self._rest = np.zeros(0, dtype=np.float32)
+        self._hang = 0
+
+    def process(self, samples):
+        x = np.concatenate([self._rest, np.asarray(samples, dtype=np.float32).ravel()])
+        n = len(x) // self.fr
+        self._rest = x[n * self.fr:]
+        out = []
+        for i in range(n):
+            f = x[i * self.fr:(i + 1) * self.fr]
+            db = 10.0 * np.log10(float(np.mean(f * f)) + 1e-10)
+            is_speech = db > max(self.noise_db + self.margin_db, self.floor_db)
+            if is_speech:
+                self._hang = self.hang_frames
+            else:  # track the noise floor on non-speech frames only
+                self.noise_db = db if db < self.noise_db else self.noise_db + 0.05 * (db - self.noise_db)
+            if is_speech or self._hang > 0:
+                if not is_speech:
+                    self._hang -= 1
+                out.append(f)
+        return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
+
+class SessionVoiceTracker:
+    """Callable ident_fn: similarity of each window to the voice heard at the START of the call.
+
+    embed_fn(window) -> 1-D vector (e.g. speaker.embed(...).numpy()). The first `enrol_s` seconds
+    of speech build the reference (returns None until then). After that, `changed` becomes True
+    when `consec` consecutive windows fall below `change_below` (cosine). The threshold is
+    model-specific: use the 'uncertain' lower bound you calibrated with calibrate_speaker.py.
+    """
+
+    def __init__(self, embed_fn, enrol_s=8.0, change_below=0.15, consec=3, sr=SR):
+        self.embed_fn, self.enrol_n = embed_fn, int(enrol_s * sr)
+        self.change_below, self.consec = change_below, consec
+        self._seen, self._embs, self.ref = 0, [], None
+        self.low_run, self.changed = 0, False
+
+    def __call__(self, window):
+        if self.ref is None:
+            self._embs.append(np.asarray(self.embed_fn(window), dtype=np.float64))
+            self._seen += len(window)
+            if self._seen >= self.enrol_n:
+                r = np.mean(self._embs, axis=0)
+                self.ref = r / (np.linalg.norm(r) + 1e-12)
+            return None
+        e = np.asarray(self.embed_fn(window), dtype=np.float64)
+        sim = float(self.ref @ (e / (np.linalg.norm(e) + 1e-12)))
+        self.low_run = self.low_run + 1 if sim < self.change_below else 0
+        if self.low_run >= self.consec:
+            self.changed = True
+        return sim
+
+
 class LiveAnalyzer:
     def __init__(self, score_fn, ident_fn=None, sr=SR, win_s=4.0, hop_s=1.0, min_s=2.0,
-                 low=0.30, high=0.70, consec=3):
-        self.score_fn, self.ident_fn = score_fn, ident_fn
+                 low=0.30, high=0.70, consec=3, gate=None, smooth=1):
+        self.score_fn, self.ident_fn, self.gate = score_fn, ident_fn, gate
         self.sr, self.win, self.hop, self.min = sr, int(win_s * sr), int(hop_s * sr), int(min_s * sr)
         self.low, self.high, self.consec = low, high, consec
-        self.buf = np.zeros(0, dtype=np.float32)
-        self.total = 0           # samples received
+        self.buf = np.zeros(0, dtype=np.float32)   # last `win` samples that were scored-eligible
+        self.total = 0           # raw samples received (wall-clock position in the call)
+        self.speech_total = 0    # samples that passed the gate
         self.next_eval = self.min
         self.streak = 0
         self.alert_active = False
+        self.recent = deque(maxlen=max(1, smooth))
         self.history = []
 
     def push(self, samples):
-        """Add mono float32 samples at self.sr. Returns the list of new events."""
+        """Add mono float32 samples at self.sr. Returns the list of new events (0 or 1)."""
         samples = np.asarray(samples, dtype=np.float32).ravel()
-        self.buf = np.concatenate([self.buf, samples])[-self.win:]
         self.total += len(samples)
-        events = []
-        while self.total >= self.next_eval:
-            events.append(self._evaluate(self.next_eval))
+        if self.gate is not None:
+            samples = self.gate.process(samples)
+        self.buf = np.concatenate([self.buf, samples])[-self.win:]
+        self.speech_total += len(samples)
+        if self.speech_total < self.next_eval:
+            return []
+        ev = self._evaluate()
+        while self.next_eval <= self.speech_total:      # skip hops we were too slow to score
             self.next_eval += self.hop
-        return events
+        return [ev]
 
-    def _evaluate(self, end_sample):
-        # Window ends at the newest buffered audio (chunks are processed as they arrive).
+    def _evaluate(self):
         window = self.buf
         t0 = time.perf_counter()
-        p = float(self.score_fn(window))
-        sim = float(self.ident_fn(window)) if self.ident_fn else None
+        raw = float(self.score_fn(window))
+        sim = self.ident_fn(window) if self.ident_fn else None
+        sim = None if sim is None else float(sim)
         latency_ms = (time.perf_counter() - t0) * 1000
+        self.recent.append(raw)
+        p = float(np.median(self.recent))
         self.streak = self.streak + 1 if p > self.high else 0
         new_alert = False
         if self.streak >= self.consec and not self.alert_active:
             self.alert_active = new_alert = True
         elif self.streak == 0:
             self.alert_active = False
-        ev = {"t": round(end_sample / self.sr, 1), "p_spoof": p, "similarity": sim,
+        ev = {"t": round(self.total / self.sr, 1), "speech_s": round(self.speech_total / self.sr, 1),
+              "p_spoof": p, "p_raw": raw, "similarity": sim,
+              "speaker_change": bool(getattr(self.ident_fn, "changed", False)),
               "risk": "High" if self.alert_active else risk_level(p, self.low, self.high),
               "new_alert": new_alert, "alert_active": self.alert_active, "latency_ms": latency_ms}
         self.history.append(ev)
@@ -63,6 +151,10 @@ class LiveAnalyzer:
             return None
         ps = [e["p_spoof"] for e in self.history]
         first_alert = next((e["t"] for e in self.history if e["new_alert"]), None)
-        return {"duration": self.total / self.sr, "peak_spoof": max(ps), "mean_spoof": float(np.mean(ps)),
-                "first_alert_t": first_alert, "mean_latency_ms": float(np.mean([e["latency_ms"] for e in self.history])),
-                "risk": "High" if first_alert is not None else risk_level(float(np.mean(ps)), self.low, self.high)}
+        changed = any(e["speaker_change"] for e in self.history)
+        mean = float(np.mean(ps))
+        return {"duration": self.total / self.sr, "speech_s": self.speech_total / self.sr,
+                "peak_spoof": max(ps), "mean_spoof": mean, "first_alert_t": first_alert,
+                "speaker_change": changed,
+                "mean_latency_ms": float(np.mean([e["latency_ms"] for e in self.history])),
+                "risk": "High" if (first_alert is not None or changed) else risk_level(mean, self.low, self.high)}

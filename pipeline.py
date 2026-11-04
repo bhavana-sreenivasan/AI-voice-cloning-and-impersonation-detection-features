@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import librosa
 
-from spoof import load_model, _pad, SR, MAX_LEN
+from detectors import load_model, forward_logits, pad_to as _pad, SR, MAX_LEN
 
 # Risk thresholds on spoof probability. Tune these using your eval scores.
 LOW_T = 0.30   # below this -> Low risk
@@ -44,7 +44,7 @@ def analyze(path, model, device):
             dtype=torch.float32
         ).to(device)
     
-        _, out = model(batch)
+        out = forward_logits(model, batch)   # works for AASIST and SSL-AASIST
         probs.extend(
             torch.softmax(out, dim=1)[:, 0].cpu().numpy().tolist()
         )

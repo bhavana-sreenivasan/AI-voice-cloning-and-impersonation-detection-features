@@ -6,12 +6,12 @@ import streamlit as st
 
 import voice_store
 from pipeline import analyze
-from spoof import load_model
+import detectors
 
 
 @st.cache_resource
 def get_model():
-    return load_model()
+    return detectors.load_model()   # set env SPOOF_MODEL=ssl to use SSL-AASIST
 
 
 @st.cache_resource
