@@ -9,6 +9,7 @@
   --no-speaker   skip the session voice-swap tracker       --no-vad   score everything, incl. silence
 """
 import argparse
+import sys
 
 import numpy as np
 
@@ -23,7 +24,21 @@ def build(args):
     model, device = detectors.load_model(args.detector)
     score_fn = lambda w: detectors.spoof_prob_window(model, device, w)    # noqa: E731
     tracker = None
-    if not args.no_speaker:
+    if args.claim or args.claim_file:     # identity check: is the caller who they claim to be?
+        import speaker
+        import voice_store
+        if args.claim_file:
+            import torch
+            from capture import load_audio_16k
+            ref = speaker.embed(torch.tensor(load_audio_16k(args.claim_file)[: 30 * 16000]))
+        else:
+            paths = voice_store.clips(args.claim)
+            if not paths:
+                sys.exit(f"No saved voice named '{args.claim}' in the voice library.")
+            ref = speaker.enroll(paths)
+        tracker = lambda w: speaker.cosine(speaker.embed(w), ref)         # noqa: E731
+        print("Comparing the caller with the claimed person's saved voice.", flush=True)
+    elif not args.no_speaker:
         import speaker
         embed_fn = lambda w: speaker.embed(w).numpy()                     # noqa: E731
         tracker = SessionVoiceTracker(embed_fn, change_below=speaker.MATCH_THRESHOLD - speaker.UNCERTAIN_MARGIN)
@@ -66,6 +81,8 @@ def main():
     ap.add_argument("--me-file", help="a clean recording of YOUR voice: it is removed from the stream")
     ap.add_argument("--drop-above", type=float, default=None,
                     help="cosine similarity to your voice above which audio is dropped (calibrate it)")
+    ap.add_argument("--claim", help="saved-voice name of the person the caller CLAIMS to be (e.g. your son)")
+    ap.add_argument("--claim-file", help="a clean recording of the person the caller claims to be")
     ap.add_argument("--no-speaker", action="store_true")
     ap.add_argument("--gate", choices=["pause", "vad", "none"], default="pause",
                     help="pause: keep natural pauses, cap long silences (default); vad: speech only; none: score everything")
@@ -74,6 +91,7 @@ def main():
     args = ap.parse_args()
 
     analyzer = build(args)
+    claimed = bool(args.claim or args.claim_file)
     if args.file:
         from capture import ArraySource
         source = ArraySource.from_file(args.file, args.channel, realtime=not args.fast)
@@ -83,6 +101,9 @@ def main():
 
     def show(e):
         sim = "  -  " if e["similarity"] is None else f"{e['similarity']:+.2f}"
+        if claimed and e["similarity"] is not None:
+            import speaker
+            sim += f" [{speaker.decide(e['similarity'])}]"
         print(f"[{e['t']:6.1f}s] {ICON[e['risk']]} spoof={e['p_spoof']:.2f} voice-sim={sim} "
               f"speech={e['speech_s']:.0f}s lat={e['latency_ms']:.0f}ms"
               + (f" user-removed={e['user_dropped_s']:.0f}s" if e["user_dropped_s"] else "")
@@ -97,6 +118,12 @@ def main():
         sess.stop()
     s = analyzer.summary()
     print("\nSummary:", s if s else "no speech analysed", f"| dropped chunks: {sess.dropped_chunks}")
+    if claimed:
+        import speaker
+        sims = [e["similarity"] for e in analyzer.history if e["similarity"] is not None]
+        if sims:
+            m = sum(sims) / len(sims)
+            print(f"Identity vs claimed voice: mean similarity {m:.2f} -> {speaker.decide(m)}")
     if sess.error:
         raise sess.error
 
