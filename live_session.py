@@ -14,8 +14,9 @@ import numpy as np
 
 
 class LiveSession:
-    def __init__(self, analyzer, source, on_event=None, max_queue=50, keep_events=600):
+    def __init__(self, analyzer, source, on_event=None, max_queue=50, keep_events=600, drop_oldest=True):
         self.analyzer, self.source, self.on_event = analyzer, source, on_event
+        self.drop_oldest = drop_oldest   # False for offline files: wait instead of dropping audio
         self.q = queue.Queue(maxsize=max_queue)
         self.events = deque(maxlen=keep_events)
         self.dropped_chunks = 0
@@ -49,6 +50,14 @@ class LiveSession:
             for chunk in self.source:
                 if self._stop.is_set():
                     break
+                if not self.drop_oldest:
+                    while not self._stop.is_set():
+                        try:
+                            self.q.put(chunk, timeout=0.2)
+                            break
+                        except queue.Full:
+                            pass
+                    continue
                 while True:
                     try:
                         self.q.put_nowait(chunk)

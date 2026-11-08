@@ -51,6 +51,21 @@ def mulaw_encode(x: np.ndarray) -> bytes:
     return bytes((~(sign | (exponent << 4) | mantissa)).astype(np.uint8) & 0xFF)
 
 
+def load_audio_16k(path, channel="mix"):
+    """Any audio file -> float32 mono 16 kHz. AAC/M4A/MP3 go through audio_io (needs ffmpeg), like the dashboard."""
+    import io
+    import os
+    import librosa
+    import audio_io
+    with open(path, "rb") as f:
+        data = f.read()
+    data, _ = audio_io.to_wav(data, os.path.splitext(path)[1] or ".wav")
+    y, _ = librosa.load(io.BytesIO(data), sr=SR, mono=False)
+    if y.ndim == 2:
+        y = y.mean(axis=0) if channel == "mix" else y[int(channel)]
+    return y.astype(np.float32)
+
+
 class ArraySource:
     """Chunks of a waveform. realtime=True sleeps so audio arrives at wall-clock speed."""
 
@@ -63,10 +78,7 @@ class ArraySource:
     @classmethod
     def from_file(cls, path, channel="mix", chunk_ms=100, realtime=True):
         """channel: 0 / 1 = that side of a stereo recording (the remote party), 'mix' = average."""
-        import librosa
-        y, _ = librosa.load(path, sr=SR, mono=False)
-        if y.ndim == 2:
-            y = y.mean(axis=0) if channel == "mix" else y[int(channel)]
+        y = load_audio_16k(path, channel)
         return cls(y, SR, chunk_ms, realtime)
 
     def __iter__(self):

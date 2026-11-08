@@ -17,10 +17,11 @@ import challenge
 import report_panel
 import voice_store
 from pipeline import fuse_risk, LOW_T, HIGH_T
-from shared import run_checks, split_call, to_wav_cached
+from caller_pick import pick_caller
+from shared import run_checks, similarity_to_user, split_call, to_wav_cached
 st.set_page_config(page_title="AI Voice Clone Detector", layout="centered")
 st.title(" AI Voice Clone & Impersonation Detector")
-st.caption("Prototype: pretrained AASIST anti-spoofing + ECAPA-TDNN speaker verification (CPU)")
+st.caption(f"Prototype: {os.environ.get('SPOOF_MODEL', 'aasist').upper()} anti-spoofing + {os.environ.get('SPEAKER_BACKEND', 'ecapa2').upper()} speaker verification")
 
 AUDIO_TYPES = ["wav", "flac", "mp3", "m4a", "aac", "ogg"]
 AUTO = "Auto (compare with everyone)"
@@ -46,6 +47,11 @@ with st.sidebar:
         if c2.button("🗑", key=f"del_{sp}", help=f"Delete all clips of {sp}"):
             voice_store.delete_speaker(sp)
             st.rerun()
+    me_name = None
+    if speakers:
+        _me = st.selectbox("Which saved voice is you?", ["(not set)"] + speakers,
+                           help="Phone calls: your own voice is ignored and only the other party is analysed.")
+        me_name = None if _me == "(not set)" else _me
     st.caption("Voice recordings are biometric data. Store them only with the speaker's consent.")
 
 # --- Input -----------------------------------------------------------------
@@ -91,9 +97,30 @@ if call_mode.startswith("Phone"):
         st.error(f"Could not separate speakers: {e}")
         st.stop()
     names = list(voices)
-    who = names[0]
+    who, default_idx = names[0], 0
     if len(names) > 1:
-        who = st.radio("Which voice is the caller?", names, horizontal=True,
+        if me_name:                      # auto-pick the caller: the voice that is NOT the user
+            import speaker
+            try:
+                with st.spinner("Matching voices to yours..."):
+                    sims = similarity_to_user(data_hash, voices, me_name, voice_store.library_key(me_name))
+                caller, user_voice, why = pick_caller(sims, speaker.MATCH_THRESHOLD,
+                                                      speaker.UNCERTAIN_MARGIN, names[0])
+            except Exception as e:       # speaker model unavailable: fall back to manual choice
+                sims, caller, user_voice, why = {}, names[0], None, f"error: {e}"
+            if why == "ok":
+                default_idx = names.index(caller)
+                st.success(f"{user_voice} matches your saved voice ({sims[user_voice]:.2f}), so "
+                           f"**{caller}** is analysed as the caller. Change it below if that is wrong.")
+            elif why == "no_match":
+                st.warning("Neither voice matched your saved voice, so please choose the caller yourself.")
+            elif why == "both_match":
+                st.warning("Both voices sound like your saved voice (maybe one person was split in two). "
+                           "Please choose the caller yourself.")
+            elif why.startswith("error"):
+                st.warning(f"Could not match voices to yours ({why[7:]}). Please choose the caller yourself.")
+            st.caption("The match threshold is a model-specific setting: calibrate it with calibrate_speaker.py.")
+        who = st.radio("Which voice is the caller?", names, index=default_idx, horizontal=True,
                        format_func=lambda k: f"{k} ({voices[k][1]:.0f} s of speech)")
         with st.expander("Listen to each separated voice"):
             for k in names:
@@ -103,13 +130,14 @@ if call_mode.startswith("Phone"):
 
 try:
     with st.spinner("Analyzing..."):
-        res, idents, speaker_missing = run_checks(data_hash, data, ext, targets, lib_keys, a_data, a_ext)
+        res, idents, speaker_missing = run_checks(data_hash, data, ext, targets, lib_keys, a_data, a_ext,
+                                                    spoof_on_isolated=call_mode.startswith("Phone"))
 except Exception as e:
     st.error(f"Could not analyze this file: {e}")
     st.stop()
 
 if speaker_missing:
-    st.warning("Speaker check skipped: run `pip install speechbrain` to enable it.")
+    st.warning("Speaker check skipped: a required package is missing (pip install torch librosa huggingface_hub).")
 
 best_name, ident = best_of(idents)
 base_risk, base_reason = fuse_risk(

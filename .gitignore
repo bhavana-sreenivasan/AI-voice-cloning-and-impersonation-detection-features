@@ -10,3 +10,5 @@ ssl_aasist/*.pt
 ssl_aasist/*.pth
 SSL_AASIST/*.pt
 SSL_AASIST/*.pth
+bin/ffmpeg.exe
+rec.aac

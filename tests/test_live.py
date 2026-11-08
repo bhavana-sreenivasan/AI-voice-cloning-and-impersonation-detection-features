@@ -9,7 +9,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from capture import ArraySource, mulaw_decode, mulaw_encode, resample_to_16k          # noqa: E402
 from calibrate_speaker import suggest_thresholds                                        # noqa: E731,E402
-from live import EnergyVAD, LiveAnalyzer, SessionVoiceTracker                           # noqa: E402
+from live import EnergyVAD, GateChain, LiveAnalyzer, PauseLimiter, SessionVoiceTracker, UserVoiceFilter                           # noqa: E402
+from caller_pick import pick_caller
 from live_session import LiveSession                                                    # noqa: E402
 
 SR = 16000
@@ -147,7 +148,66 @@ def test_call_log_migration_and_model_tag():
     assert [r[2] for r in call_log.similar_calls([1.0, 0.0], emb_model="ecapa2")] == ["+912"]
     assert [r[2] for r in call_log.similar_calls([1.0, 0.0], emb_model="speechbrain")] == ["+911"]
     assert len(call_log.similar_calls([1.0, 0.0])) == 2
-    os.remove(old)
+    import gc
+    gc.collect()
+    try:
+        os.remove(old)
+    except PermissionError:
+        pass  # Windows may still hold the temp DB open; harmless
+
+
+def test_user_voice_filter_keeps_only_remote():
+    def tone(f, sec):
+        t = np.arange(int(sec * SR)) / SR
+        return (0.1 * np.sin(2 * np.pi * f * t)).astype(np.float32)
+
+    def embed(w):                                   # fake: 180 Hz = user (axis 0), 400 Hz = remote (axis 1)
+        k = int(np.argmax(np.abs(np.fft.rfft(w))))
+        hz = k * SR / len(w)
+        v = np.zeros(4); v[0 if hz < 300 else 1] = 1.0
+        return v
+    user_ref = np.array([1.0, 0, 0, 0])
+    flt = UserVoiceFilter(embed, user_ref, drop_above=0.5, slice_s=1.0)
+    mixed = np.concatenate([tone(180, 3), tone(400, 3), tone(180, 2), tone(400, 2)])
+    out = np.concatenate([flt.process(mixed[i:i + 1600]) for i in range(0, len(mixed), 1600)])
+    assert abs(flt.dropped_s - 5.0) < 0.01          # all user slices removed
+    assert abs(len(out) / SR - 5.0) < 0.01          # only remote audio kept
+    # end to end: analyzer only ever scores remote audio
+    seen = []
+    an = LiveAnalyzer(lambda w: seen.append(np.abs(np.fft.rfft(w[:SR])).argmax()) or 0.1,
+                      gate=GateChain(EnergyVAD(), UserVoiceFilter(embed, user_ref, 0.5)), min_s=2.0)
+    ev = feed(an, mixed)
+    assert ev and seen and all(k >= 300 for k in seen)   # every scored window is the 400 Hz remote voice
+    assert ev[-1]["user_dropped_s"] >= 4.0
+
+
+def test_pick_caller():
+    t, m = 0.30, 0.10
+    # clear case: A is the user -> caller is B (in either order)
+    assert pick_caller({"A": 0.7, "B": 0.05}, t, m, "A") == ("B", "A", "ok")
+    assert pick_caller({"A": 0.05, "B": 0.7}, t, m, "A") == ("A", "B", "ok")
+    # nobody sounds like the user -> manual
+    assert pick_caller({"A": 0.1, "B": 0.0}, t, m, "A")[2] == "no_match"
+    # both sound like the user (one person split in two) -> manual
+    assert pick_caller({"A": 0.8, "B": 0.6}, t, m, "A")[2] == "both_match"
+    # single voice
+    assert pick_caller({"A": 0.9}, t, m, "A")[2] == "single"
+    # borderline user match (inside the uncertain zone) still counts as the user's voice
+    assert pick_caller({"A": 0.32, "B": 0.0}, t, m, "A") == ("B", "A", "ok")
+
+
+def test_pause_limiter_keeps_short_pauses_caps_long_ones():
+    g = PauseLimiter(max_pause_s=0.6)
+    short = np.concatenate([speechlike(1), silence(0.3), speechlike(1)])       # natural pause: kept whole
+    assert abs(len(g.process(short)) / SR - 2.3) < 0.05
+    g = PauseLimiter(max_pause_s=0.6)
+    long_ = np.concatenate([speechlike(2), silence(5), speechlike(2)])          # long gap: capped at ~0.6 s
+    assert abs(len(g.process(long_)) / SR - 4.6) < 0.1
+    # a silent stream never fills a scoring window
+    calls = []
+    an = LiveAnalyzer(lambda w: calls.append(1) or 0.9, gate=PauseLimiter(), min_s=2.0)
+    feed(an, silence(20))
+    assert calls == []
 
 
 if __name__ == "__main__":

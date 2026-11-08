@@ -92,7 +92,8 @@ def embed(wav):
     x = wav.unsqueeze(0).to(DEVICE)                   # (1, samples)
     with torch.no_grad():
         if BACKEND == "ecapa2":
-            e = _get_model()(x)                       # ECAPA2 sets eval mode itself
+            with torch.jit.optimized_execution(False):   # avoids very slow first calls
+                e = _get_model()(x)                       # ECAPA2 sets eval mode itself
         else:
             e = _get_model().encode_batch(x)
     e = e.reshape(-1).float().cpu()

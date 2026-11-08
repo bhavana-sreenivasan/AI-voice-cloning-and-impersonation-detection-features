@@ -62,6 +62,103 @@ class EnergyVAD:
         return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
 
 
+class PauseLimiter:
+    """Keeps natural pauses but caps every silent stretch at `max_pause_s`.
+
+    Why not EnergyVAD? Joining only the speech removes all pauses. AASIST (trained on ASVspoof
+    2019) scored the same real recording 0.48 raw but 0.86 speech-only, so it reacts to pauses.
+    This gate still stops long silences (e.g. the remote side is quiet while you talk) from
+    filling the scoring window, but leaves the audio sounding like normal speech.
+    Same interface as EnergyVAD: .process(samples) -> samples to keep.
+    """
+
+    def __init__(self, sr=SR, frame_ms=20, max_pause_s=0.6, margin_db=10.0, floor_db=-55.0):
+        self.fr = int(sr * frame_ms / 1000)
+        self.max_frames = max(1, int(max_pause_s * 1000 / frame_ms))
+        self.margin_db, self.floor_db = margin_db, floor_db
+        self.noise_db = floor_db
+        self._rest = np.zeros(0, dtype=np.float32)
+        self._run = 0                      # consecutive non-speech frames kept so far
+
+    def process(self, samples):
+        x = np.concatenate([self._rest, np.asarray(samples, dtype=np.float32).ravel()])
+        n = len(x) // self.fr
+        self._rest = x[n * self.fr:]
+        out = []
+        for i in range(n):
+            f = x[i * self.fr:(i + 1) * self.fr]
+            db = 10.0 * np.log10(float(np.mean(f * f)) + 1e-10)
+            if db > max(self.noise_db + self.margin_db, self.floor_db):
+                self._run = 0
+                out.append(f)
+            else:
+                self.noise_db = db if db < self.noise_db else self.noise_db + 0.05 * (db - self.noise_db)
+                self._run += 1
+                if self._run <= self.max_frames:
+                    out.append(f)
+        return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
+
+class UserVoiceFilter:
+    """Removes the LOCAL user's own voice from a mixed stream, keeping only the other party.
+
+    Works on speech-only audio (put it after EnergyVAD in a GateChain). Audio is cut into
+    `slice_s` slices; each slice is embedded and compared with the user's enrolled voiceprint.
+    Slices that sound like the user (cosine >= drop_above) are discarded, the rest are kept.
+
+    embed_fn(slice) -> 1-D vector;  user_ref -> the user's enrolled embedding (same model!).
+    Only needed when the user's microphone is in the stream (speakerphone, one-channel recording,
+    a conference mix). With system-output loopback or a remote-only telephony track the user's
+    voice is never captured and this filter is unnecessary.
+
+    Limits: slices are short, so embeddings are noisy; overlapping speech cannot be separated;
+    and the kept audio is stitched from non-adjacent pieces. `drop_above` must be calibrated.
+    """
+
+    def __init__(self, embed_fn, user_ref, drop_above, slice_s=1.0, sr=SR):
+        r = np.asarray(user_ref, dtype=np.float64)
+        self.embed_fn, self.ref = embed_fn, r / (np.linalg.norm(r) + 1e-12)
+        self.drop_above, self.n = drop_above, int(slice_s * sr)
+        self._rest = np.zeros(0, dtype=np.float32)
+        self.kept_samples = self.dropped_samples = 0
+        self.last_sim = None
+
+    @property
+    def dropped_s(self):
+        return self.dropped_samples / SR
+
+    def process(self, samples):
+        x = np.concatenate([self._rest, np.asarray(samples, dtype=np.float32).ravel()])
+        out = []
+        while len(x) >= self.n:
+            piece, x = x[:self.n], x[self.n:]
+            e = np.asarray(self.embed_fn(piece), dtype=np.float64)
+            self.last_sim = float(self.ref @ (e / (np.linalg.norm(e) + 1e-12)))
+            if self.last_sim >= self.drop_above:
+                self.dropped_samples += len(piece)
+            else:
+                self.kept_samples += len(piece)
+                out.append(piece)
+        self._rest = x
+        return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
+
+class GateChain:
+    """Run several gates in order: GateChain(EnergyVAD(), UserVoiceFilter(...))."""
+
+    def __init__(self, *gates):
+        self.gates = gates
+
+    def process(self, x):
+        for g in self.gates:
+            x = g.process(x)
+        return x
+
+    @property
+    def dropped_s(self):
+        return sum(getattr(g, "dropped_s", 0.0) for g in self.gates)
+
+
 class SessionVoiceTracker:
     """Callable ident_fn: similarity of each window to the voice heard at the START of the call.
 
@@ -139,6 +236,7 @@ class LiveAnalyzer:
         elif self.streak == 0:
             self.alert_active = False
         ev = {"t": round(self.total / self.sr, 1), "speech_s": round(self.speech_total / self.sr, 1),
+              "user_dropped_s": round(float(getattr(self.gate, "dropped_s", 0.0)), 1),
               "p_spoof": p, "p_raw": raw, "similarity": sim,
               "speaker_change": bool(getattr(self.ident_fn, "changed", False)),
               "risk": "High" if self.alert_active else risk_level(p, self.low, self.high),

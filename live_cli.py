@@ -13,7 +13,7 @@ import argparse
 import numpy as np
 
 import detectors
-from live import EnergyVAD, LiveAnalyzer, SessionVoiceTracker
+from live import EnergyVAD, GateChain, LiveAnalyzer, PauseLimiter, SessionVoiceTracker, UserVoiceFilter
 from live_session import LiveSession
 
 ICON = {"Low": "OK  ", "Uncertain": "??  ", "High": "ALRT"}
@@ -27,7 +27,29 @@ def build(args):
         import speaker
         embed_fn = lambda w: speaker.embed(w).numpy()                     # noqa: E731
         tracker = SessionVoiceTracker(embed_fn, change_below=speaker.MATCH_THRESHOLD - speaker.UNCERTAIN_MARGIN)
-    return LiveAnalyzer(score_fn, tracker, gate=None if args.no_vad else EnergyVAD(),
+    removing_user = bool(args.me_file or args.me)
+    if args.no_vad or args.gate == "none":
+        gates = []
+    elif args.gate == "pause" and not removing_user:
+        gates = [PauseLimiter()]
+    else:                                  # speech-only is needed to tell speakers apart (--me)
+        gates = [EnergyVAD()]
+        if args.gate == "pause":
+            print("Note: with --me the audio is speech-only (pauses are removed).", flush=True)
+    if args.me_file or args.me:                  # remove the local user's own voice
+        import speaker
+        import torch
+        import voice_store
+        if args.me_file:
+            from capture import load_audio_16k
+            wav = load_audio_16k(args.me_file)[: 30 * 16000]      # up to 30 s is plenty
+            ref = speaker.embed(torch.tensor(wav)).numpy()
+        else:
+            ref = speaker.enroll(voice_store.clips(args.me)).numpy()
+        t = speaker.MATCH_THRESHOLD if args.drop_above is None else args.drop_above
+        gates.append(UserVoiceFilter(lambda w: speaker.embed(w).numpy(), ref, drop_above=t))
+        print(f"Ignoring the local user's voice (similarity >= {t:.2f} is dropped).", flush=True)
+    return LiveAnalyzer(score_fn, tracker, gate=GateChain(*gates) if gates else None,
                         hop_s=args.hop, smooth=args.smooth)
 
 
@@ -40,8 +62,14 @@ def main():
     ap.add_argument("--detector", choices=["aasist", "ssl"], default=detectors.default_name())
     ap.add_argument("--hop", type=float, default=1.0, help="seconds between scores (raise on slow CPUs)")
     ap.add_argument("--smooth", type=int, default=3)
+    ap.add_argument("--me", help="name of YOUR voice in the saved-voice library: it is removed from the stream")
+    ap.add_argument("--me-file", help="a clean recording of YOUR voice: it is removed from the stream")
+    ap.add_argument("--drop-above", type=float, default=None,
+                    help="cosine similarity to your voice above which audio is dropped (calibrate it)")
     ap.add_argument("--no-speaker", action="store_true")
-    ap.add_argument("--no-vad", action="store_true")
+    ap.add_argument("--gate", choices=["pause", "vad", "none"], default="pause",
+                    help="pause: keep natural pauses, cap long silences (default); vad: speech only; none: score everything")
+    ap.add_argument("--no-vad", action="store_true", help="same as --gate none")
     ap.add_argument("--fast", action="store_true", help="--file only: don't pace in real time")
     args = ap.parse_args()
 
@@ -57,10 +85,11 @@ def main():
         sim = "  -  " if e["similarity"] is None else f"{e['similarity']:+.2f}"
         print(f"[{e['t']:6.1f}s] {ICON[e['risk']]} spoof={e['p_spoof']:.2f} voice-sim={sim} "
               f"speech={e['speech_s']:.0f}s lat={e['latency_ms']:.0f}ms"
+              + (f" user-removed={e['user_dropped_s']:.0f}s" if e["user_dropped_s"] else "")
               + ("  << NEW ALERT" if e["new_alert"] else "")
               + ("  << SPEAKER CHANGED" if e["speaker_change"] else ""), flush=True)
 
-    sess = LiveSession(analyzer, source, on_event=show).start()
+    sess = LiveSession(analyzer, source, on_event=show, drop_oldest=not args.fast).start()
     try:
         while sess.running:
             sess.join(0.5)
