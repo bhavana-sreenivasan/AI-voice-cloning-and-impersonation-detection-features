@@ -3,10 +3,14 @@
   # Test on a recording, paced like a real call; remote party is channel 0 of the stereo file:
   python live_cli.py --file call.wav --channel 0 --detector aasist
 
+  # One mixed recording (you + the caller): remove YOUR voice using a clean sample of it:
+  python live_cli.py --file call.wav --me-file my_voice.wav --normalize
+
   # Live: analyse what the computer is playing (= the remote party only):
   python live_cli.py --loopback --detector ssl
 
   --no-speaker   skip the session voice-swap tracker       --no-vad   score everything, incl. silence
+  --normalize    scale speech to a steady level before scoring (see levelnorm.py)
 """
 import argparse
 import sys
@@ -14,6 +18,7 @@ import sys
 import numpy as np
 
 import detectors
+from levelnorm import LevelNormalizer
 from live import EnergyVAD, GateChain, LiveAnalyzer, PauseLimiter, SessionVoiceTracker, UserVoiceFilter
 from live_session import LiveSession
 
@@ -64,6 +69,9 @@ def build(args):
         t = speaker.MATCH_THRESHOLD if args.drop_above is None else args.drop_above
         gates.append(UserVoiceFilter(lambda w: speaker.embed(w).numpy(), ref, drop_above=t))
         print(f"Ignoring the local user's voice (similarity >= {t:.2f} is dropped).", flush=True)
+    if args.normalize:                           # steady speech level before the spoof model
+        gates.append(LevelNormalizer(target_db=args.target_db))
+        print(f"Level normalisation on (target {args.target_db:.1f} dB).", flush=True)
     return LiveAnalyzer(score_fn, tracker, gate=GateChain(*gates) if gates else None,
                         hop_s=args.hop, smooth=args.smooth)
 
@@ -87,6 +95,10 @@ def main():
     ap.add_argument("--gate", choices=["pause", "vad", "none"], default="pause",
                     help="pause: keep natural pauses, cap long silences (default); vad: speech only; none: score everything")
     ap.add_argument("--no-vad", action="store_true", help="same as --gate none")
+    ap.add_argument("--normalize", action="store_true",
+                    help="scale speech to a steady level before scoring (reduces loudness sensitivity)")
+    ap.add_argument("--target-db", type=float, default=-20.0,
+                    help="speech level to scale to (95th-percentile frame level, dB); see levelnorm.py")
     ap.add_argument("--fast", action="store_true", help="--file only: don't pace in real time")
     args = ap.parse_args()
 
