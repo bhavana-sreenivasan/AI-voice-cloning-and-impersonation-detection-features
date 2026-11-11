@@ -72,8 +72,9 @@ def build(args):
     if args.normalize:                           # steady speech level before the spoof model
         gates.append(LevelNormalizer(target_db=args.target_db))
         print(f"Level normalisation on (target {args.target_db:.1f} dB).", flush=True)
-    return LiveAnalyzer(score_fn, tracker, gate=GateChain(*gates) if gates else None,
-                        hop_s=args.hop, smooth=args.smooth)
+    return LiveAnalyzer(score_fn, tracker,
+        gate=GateChain(*gates) if gates else None,
+        smooth=3, check_quality=True)
 
 
 def main():

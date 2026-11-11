@@ -1,6 +1,13 @@
-"""Split a call recording into speakers so each voice is analysed on its own."""
-import io
+"""Split a call recording into speakers so each voice is analysed on its own. diarize.py"""
+import io, os
+import audio_io
 
+def _load_any(path):
+    with open(path, "rb") as f:
+        data, _ = audio_io.to_wav(f.read(), os.path.splitext(path)[1] or ".wav")
+    return librosa.load(io.BytesIO(data), sr=SR, mono=False)
+
+# in split():  y, _ = _load_any(path)     # instead of librosa.load(path, sr=SR, mono=False)
 import librosa
 import numpy as np
 import soundfile as sf
@@ -12,6 +19,8 @@ import speaker  # reuses your ECAPA embeddings
 SR = 16000
 WIN, HOP = int(1.5 * SR), int(0.75 * SR)
 SAME_SPEAKER_COS = 0.55   # centroids more similar than this => treat as ONE speaker (tune it)
+MERGE_GAP_S = 0.5         # join speech spans closer than this: choppy / noise-gated phone audio is cut into
+                          # many tiny spans, which leaves too few 1.5 s windows to cluster (0 = off)
 
 
 def _speech_only(x, top_db=30):
@@ -29,26 +38,77 @@ def _by_channel(y):
         return None  # silent channel or dual-mono
     return [_speech_only(a), _speech_only(b)]
 
+def _merge_close(spans, gap):
+    """Join speech spans separated by less than `gap` samples."""
+    out = [list(spans[0])]
+    for s, e in spans[1:]:
+        if s - out[-1][1] <= gap:
+            out[-1][1] = e
+        else:
+            out.append([s, e])
+    return out
+
 
 def _by_clustering(wav):
     spans = librosa.effects.split(wav, top_db=30)
-    wins = [(st, st + WIN) for s, e in spans for st in range(s, e - WIN + 1, HOP)]
+    n_raw = len(spans)
+    if MERGE_GAP_S > 0 and n_raw:
+        spans = _merge_close(spans, int(MERGE_GAP_S * SR))
+        print(f"Speech spans merged (gaps < {MERGE_GAP_S}s): {n_raw} -> {len(spans)}")
+
+    wins = [
+        (st, st + WIN)
+        for s, e in spans
+        for st in range(s, e - WIN + 1, HOP)
+    ]
+
+    print(f"Speech spans: {len(spans)}")
+    print(f"Generated windows: {len(wins)}")
+    print("Window durations:", [(b-a)/SR for a, b in wins])
+
     if len(wins) < 4:
         return [_speech_only(wav)]
-    embs = np.stack([speaker.embed(torch.tensor(wav[a:b])).numpy() for a, b in wins])
-    labels = AgglomerativeClustering(n_clusters=2, metric="cosine", linkage="average").fit_predict(embs)
-    if min((labels == 0).sum(), (labels == 1).sum()) < 2:
+
+    embs = np.stack([
+        speaker.embed(torch.as_tensor(wav[a:b], dtype=torch.float32))
+        .detach().cpu().numpy()
+        for a, b in wins
+    ])
+
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        distance_threshold=1 - SAME_SPEAKER_COS,   # = 0.45, ties the cut-off to the constant above
+        metric="cosine",
+        linkage="average"
+    )
+
+    labels = clustering.fit_predict(embs)
+    unique = np.unique(labels)
+
+    print(f"Detected clusters: {len(unique)}")
+
+    if len(unique) < 2:
         return [_speech_only(wav)]
-    c = [embs[labels == k].mean(0) for k in (0, 1)]
-    c = [v / np.linalg.norm(v) for v in c]
-    if float(c[0] @ c[1]) > SAME_SPEAKER_COS:
-        return [_speech_only(wav)]
-    # give each window's middle HOP samples to its cluster (avoids duplicating overlap)
-    mask = np.full(len(wav), -1)
+
+    mask = np.full(len(wav), -1, dtype=int)
+
     for (a, b), k in zip(wins, labels):
         mid = (a + b) // 2
-        mask[mid - HOP // 2: mid + HOP // 2] = k
-    return [wav[mask == k] for k in (0, 1)]
+        start = mid - HOP // 2
+        end = mid + HOP // 2
+        mask[start:end] = k
+
+    parts = [
+        wav[mask == k]
+        for k in unique
+        if np.sum(mask == k) > 0
+    ]
+
+    return parts
+
+
+
+    
 
 
 def split(path):

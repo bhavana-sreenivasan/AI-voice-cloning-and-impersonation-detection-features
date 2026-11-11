@@ -144,6 +144,7 @@ base_risk, base_reason = fuse_risk(
     res["risk"],
     ident["decision"] if ident else None,
     ident["speaker_change"] if ident else False,
+    spoof_unreliable=res.get("unreliable", False),
 )
 
 # --- Log the call (one row per clip + number; refreshed if the result changes) ----
@@ -169,6 +170,8 @@ final_risk, reason = (verif["risk"], verif["reason"]) if verif else (base_risk, 
 with st.container(border=True):
     st.markdown(f"### {icon[final_risk]} {final_risk} risk")
     st.write(reason)
+    if res.get("unreliable"):
+        st.caption("Spoof detection was skipped for this audio. Use the challenge step below.")
     if verif:
         st.caption(f"After verification ({verif['outcome']}). Before: {base_risk}.")
     if res["alert_time"] is not None:
@@ -188,7 +191,10 @@ def card(label, value, sub=""):
     st.caption(sub or "\u00a0")
 m1, m2, m3 = st.columns(3)
 with m1.container(border=True):
-    card("Authenticity", res["label"], f"{res['confidence']:.0%} confidence")
+    if res.get("unreliable"):
+        card("Authenticity", "Not assessed", "phone-quality audio")
+    else:
+        card("Authenticity", res["label"], f"{res['confidence']:.0%} confidence")
 with m2.container(border=True):
     if ident:
         card("Closest saved voice", best_name,
@@ -196,8 +202,10 @@ with m2.container(border=True):
     else:
         card("Closest saved voice", "—", "No saved voices yet")
 with m3.container(border=True):
-    card("Suspicious audio", f"{res['frac_suspicious']:.0%}", f"of {res['duration']:.0f} s clip")
-
+    if res.get("unreliable"):
+        card("Suspicious audio", "—", "not reliable here")
+    else:
+        card("Suspicious audio", f"{res['frac_suspicious']:.0%}", f"of {res['duration']:.0f} s clip")
 # --- 3. Additional verification (only for borderline results) --------------
 if base_risk == "Uncertain":
     with st.container(border=True):
@@ -262,17 +270,23 @@ tab_time, tab_auth, tab_id, tab_save, tab_report = st.tabs(
 
 with tab_time:
     sp_df = pd.DataFrame(res["timeline"], columns=["time (s)", "Spoof probability"]).set_index("time (s)")
+    if res.get("unreliable"):
+        st.caption("The spoof-probability line is hidden: the detector is not reliable on phone-quality audio.")
+        sp_df = sp_df.iloc[:0]
     if ident:
         id_df = pd.DataFrame(ident["timeline"], columns=["time (s)", "Similarity to voice"]).set_index("time (s)")
         both = pd.concat([sp_df, id_df], axis=1).sort_index().interpolate(limit_direction="both")
     else:
         both = sp_df
-    (st.bar_chart if len(both) < 3 else st.line_chart)(both, height=300)
-    st.caption("One line per check on a shared time axis. High spoof probability means synthetic speech; "
-               "a high similarity means the voice sounds like the saved speaker. "
-               "Each point is a ~4 s segment.")
+    if both.empty:
+        st.info("Nothing to plot: no reliable spoof scores and no saved voice to compare with.")
+    else:
+        (st.bar_chart if len(both) < 3 else st.line_chart)(both, height=300)
 
 with tab_auth:
+    if res.get("unreliable"):
+        st.warning(f"Phone-quality audio (high-frequency level {res['hf_db']:.0f} dB vs mid band). "
+                   "The values below come from a detector that is not reliable on this audio.")
     a1, a2 = st.columns(2)
     a1.metric("Spoof probability (average)", f"{res['p_spoof']:.0%}")
     a2.metric("Segments flagged", f"{res['frac_suspicious']:.0%}")

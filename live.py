@@ -101,41 +101,57 @@ class PauseLimiter:
 
 class UserVoiceFilter:
     """Removes the LOCAL user's own voice from a mixed stream, keeping only the other party.
-
-    Works on speech-only audio (put it after EnergyVAD in a GateChain). Audio is cut into
-    `slice_s` slices; each slice is embedded and compared with the user's enrolled voiceprint.
-    Slices that sound like the user (cosine >= drop_above) are discarded, the rest are kept.
-
+    Audio is cut into `slice_s` slices; each slice is embedded and compared with the user's
+    enrolled voiceprint. Slices that sound like the user (cosine >= drop_above) are dropped.
+    replace=False (old behaviour): dropped slices are deleted, so the kept audio is stitched
+        together. Both detectors score stitched, pause-free audio as fake (silence_experiment.py).
+    replace=True: a dropped slice is replaced by faint noise of the same length, so the timing
+        and pauses of the other party's speech survive. Put a PauseLimiter AFTER this filter so
+        a long user turn does not fill the scoring window with silence.
+    hysteresis: once dropping, keep dropping until the similarity falls below
+        drop_above - hysteresis (stops a turn from flickering on and off).
+    silence_db: slices quieter than this (mean power, dB) are passed through untouched without
+        being embedded (None = embed everything, the old behaviour).
     embed_fn(slice) -> 1-D vector;  user_ref -> the user's enrolled embedding (same model!).
-    Only needed when the user's microphone is in the stream (speakerphone, one-channel recording,
-    a conference mix). With system-output loopback or a remote-only telephony track the user's
-    voice is never captured and this filter is unnecessary.
-
-    Limits: slices are short, so embeddings are noisy; overlapping speech cannot be separated;
-    and the kept audio is stitched from non-adjacent pieces. `drop_above` must be calibrated.
     """
-
-    def __init__(self, embed_fn, user_ref, drop_above, slice_s=1.0, sr=SR):
+    def __init__(self, embed_fn, user_ref, drop_above, slice_s=1.0, sr=SR,
+                 replace=False, hysteresis=0.0, silence_db=None, seed=0):
         r = np.asarray(user_ref, dtype=np.float64)
         self.embed_fn, self.ref = embed_fn, r / (np.linalg.norm(r) + 1e-12)
         self.drop_above, self.n = drop_above, int(slice_s * sr)
+        self.replace, self.hyst, self.silence_db = replace, hysteresis, silence_db
+        self._rng = np.random.default_rng(seed)
+        self._floor_db = -62.0
+        self._dropping = False
         self._rest = np.zeros(0, dtype=np.float32)
         self.kept_samples = self.dropped_samples = 0
         self.last_sim = None
-
     @property
     def dropped_s(self):
         return self.dropped_samples / SR
-
+    def _quiet(self, piece):
+        amp = 10.0 ** (self._floor_db / 20.0)
+        return (amp * self._rng.standard_normal(len(piece))).astype(np.float32)
     def process(self, samples):
         x = np.concatenate([self._rest, np.asarray(samples, dtype=np.float32).ravel()])
         out = []
         while len(x) >= self.n:
             piece, x = x[:self.n], x[self.n:]
+            if self.silence_db is not None:
+                db = 10.0 * np.log10(float(np.mean(piece * piece)) + 1e-10)
+                if db < self.silence_db:          # a pause: nothing to identify, keep it as it is
+                    self._floor_db = float(np.clip(0.9 * self._floor_db + 0.1 * db, -75.0, -50.0))
+                    self.kept_samples += len(piece)
+                    out.append(piece)
+                    continue
             e = np.asarray(self.embed_fn(piece), dtype=np.float64)
             self.last_sim = float(self.ref @ (e / (np.linalg.norm(e) + 1e-12)))
-            if self.last_sim >= self.drop_above:
+            limit = self.drop_above - (self.hyst if self._dropping else 0.0)
+            self._dropping = self.last_sim >= limit
+            if self._dropping:
                 self.dropped_samples += len(piece)
+                if self.replace:
+                    out.append(self._quiet(piece))
             else:
                 self.kept_samples += len(piece)
                 out.append(piece)
@@ -192,7 +208,7 @@ class SessionVoiceTracker:
 
 class LiveAnalyzer:
     def __init__(self, score_fn, ident_fn=None, sr=SR, win_s=4.0, hop_s=1.0, min_s=2.0,
-                 low=0.30, high=0.70, consec=3, gate=None, smooth=1):
+        low=0.30, high=0.70, consec=3, gate=None, smooth=1, check_quality=False):
         self.score_fn, self.ident_fn, self.gate = score_fn, ident_fn, gate
         self.sr, self.win, self.hop, self.min = sr, int(win_s * sr), int(hop_s * sr), int(min_s * sr)
         self.low, self.high, self.consec = low, high, consec
@@ -204,6 +220,8 @@ class LiveAnalyzer:
         self.alert_active = False
         self.recent = deque(maxlen=max(1, smooth))
         self.history = []
+        self.check_quality = check_quality   # True: narrowband audio never raises an alert (see quality.py)
+        
 
     def push(self, samples):
         """Add mono float32 samples at self.sr. Returns the list of new events (0 or 1)."""
@@ -229,7 +247,11 @@ class LiveAnalyzer:
         latency_ms = (time.perf_counter() - t0) * 1000
         self.recent.append(raw)
         p = float(np.median(self.recent))
-        self.streak = self.streak + 1 if p > self.high else 0
+        unreliable = False
+        if self.check_quality:
+            import quality
+            unreliable = bool(quality.check(window, self.sr)["narrowband"])
+        self.streak = self.streak + 1 if (p > self.high and not unreliable) else 0
         new_alert = False
         if self.streak >= self.consec and not self.alert_active:
             self.alert_active = new_alert = True
@@ -239,8 +261,8 @@ class LiveAnalyzer:
               "user_dropped_s": round(float(getattr(self.gate, "dropped_s", 0.0)), 1),
               "p_spoof": p, "p_raw": raw, "similarity": sim,
               "speaker_change": bool(getattr(self.ident_fn, "changed", False)),
-              "risk": "High" if self.alert_active else risk_level(p, self.low, self.high),
-              "new_alert": new_alert, "alert_active": self.alert_active, "latency_ms": latency_ms}
+              "risk": "High" if self.alert_active else ("Uncertain" if unreliable else risk_level(p, self.low, self.high)),
+              "unreliable": unreliable, "new_alert": new_alert, "alert_active": self.alert_active, "latency_ms": latency_ms}
         self.history.append(ev)
         return ev
 
@@ -251,8 +273,22 @@ class LiveAnalyzer:
         first_alert = next((e["t"] for e in self.history if e["new_alert"]), None)
         changed = any(e["speaker_change"] for e in self.history)
         mean = float(np.mean(ps))
-        return {"duration": self.total / self.sr, "speech_s": self.speech_total / self.sr,
-                "peak_spoof": max(ps), "mean_spoof": mean, "first_alert_t": first_alert,
-                "speaker_change": changed,
-                "mean_latency_ms": float(np.mean([e["latency_ms"] for e in self.history])),
-                "risk": "High" if (first_alert is not None or changed) else risk_level(mean, self.low, self.high)}
+        unrel = float(np.mean([e.get("unreliable", False) for e in self.history]))
+        
+        return {
+            "duration": self.total / self.sr,
+            "speech_s": self.speech_total / self.sr,
+            "peak_spoof": max(ps),
+            "mean_spoof": mean,
+            "first_alert_t": first_alert,
+            "speaker_change": changed,
+            "unreliable_frac": unrel,
+            "mean_latency_ms": float(np.mean(
+                [e["latency_ms"] for e in self.history]
+            )),
+            "risk": (
+                "High" if (first_alert is not None or changed)
+                else "Uncertain" if unrel > 0
+                else risk_level(mean, self.low, self.high)
+            )
+        }

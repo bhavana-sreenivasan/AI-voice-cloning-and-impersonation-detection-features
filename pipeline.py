@@ -4,6 +4,7 @@ import torch
 import librosa
 
 from detectors import load_model, forward_logits, pad_to as _pad, SR, MAX_LEN
+import quality
 
 # Risk thresholds on spoof probability. Tune these using your eval scores.
 LOW_T = 0.30   # below this -> Low risk
@@ -30,7 +31,7 @@ def _windows(wav):
 
 
 @torch.no_grad()
-def analyze(path, model, device):
+def analyze(path, model, device, check_quality=True):
     wav, _ = librosa.load(path, sr=SR, mono=True)
     if len(wav) < SR // 2:
         raise ValueError("Audio too short (need at least 0.5 seconds).")
@@ -71,7 +72,18 @@ def analyze(path, model, device):
         label = "Fake" if p_spoof >= 0.5 else "Real"
         confidence = max(p_spoof, 1 - p_spoof)
         risk = risk_level(p_spoof)
+
+    # Phone-quality (narrowband) audio: the detectors score loudness/pauses, not realness, so the
+    # spoof score must not raise or clear an alert here. Raw values are kept under *_raw.
+    q = quality.check(wav) if check_quality else {"hf_db": None, "narrowband": False}
+    unreliable = bool(q["narrowband"])
+    raw = {"label_raw": label, "risk_raw": risk, "alert_time_raw": alert_time}
+    if unreliable:
+        label, risk, alert_time = "Unreliable (phone-quality audio)", "Uncertain", None
     return {
+        **raw,
+        "unreliable": unreliable,
+        "hf_db": q["hf_db"],
         "label": label,
         "confidence": confidence,
         "p_spoof": p_spoof,
@@ -83,13 +95,21 @@ def analyze(path, model, device):
     }
 
 
-def fuse_risk(spoof_risk, identity=None, speaker_change=False):
+NARROWBAND_REASON = ("Phone-quality (narrowband) audio: the synthetic-voice detector is not reliable on it, "
+                     "so it was not used. Rely on the voice-identity check or the challenge step.")
+
+
+def fuse_risk(spoof_risk, identity=None, speaker_change=False, spoof_unreliable=False):
     """Combine the spoof-detector risk with the speaker-identity decision.
 
     spoof_risk : "Low" | "Uncertain" | "High"   (from analyze())
     identity   : None | "match" | "uncertain" | "mismatch"  (from speaker.py)
+    spoof_unreliable : True when the audio is narrowband (analyze()["unreliable"]): the spoof
+                       result is ignored; identity mismatch / speaker change still raise High.
     Returns (risk, reason).
     """
+    if spoof_unreliable:
+        spoof_risk = None
     if spoof_risk == "High":
         return "High", "Synthetic speech detected."
     if identity == "mismatch":
@@ -97,6 +117,8 @@ def fuse_risk(spoof_risk, identity=None, speaker_change=False):
                         "speaker (possible human impersonation or wrong person).")
     if speaker_change:
         return "High", "The speaker changed partway through the clip."
+    if spoof_unreliable:
+        return "Uncertain", NARROWBAND_REASON
     if spoof_risk == "Uncertain" or identity == "uncertain":
         return "Uncertain", "Result is borderline: run an additional verification step."
     if identity == "match":
