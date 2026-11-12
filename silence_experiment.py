@@ -25,6 +25,7 @@ Usage (project folder, in the venv that runs your detector):
     python silence_experiment.py --root "C:\\...\\project\\data\\LA" --model ssl
     python silence_experiment.py --root ... --n 200        # quicker
     python silence_experiment.py --root ... --degrade      # + phone8k / phone_aac conditions
+    python silence_experiment.py --root ... --degrade --checkpoint finetune_out\\best.pth   # fine-tuned AASIST
 Needs: numpy, soundfile, torch (+ what the chosen detector needs).
 """
 import argparse
@@ -38,7 +39,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from levelnorm import frame_db  # noqa: E402
-import tests.quality as quality  # noqa: E402
+import quality  # noqa: E402
 
 SR = 16000
 FR = 320
@@ -155,6 +156,7 @@ def main():
     ap.add_argument("--n", type=int, default=0, help="max clips (0 = all labeled clips found)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--degrade", action="store_true", help="also score phone8k and phone_aac versions")
+    ap.add_argument("--checkpoint", help="fine-tuned AASIST weights (.pth); only with --model aasist")
     ap.add_argument("--csv", default="silence_experiment.csv")
     args = ap.parse_args()
 
@@ -184,7 +186,13 @@ def main():
         else:
             print("ffmpeg not found on PATH: skipping phone_aac (PowerShell: $env:PATH += \";$PWD\\bin\")")
 
-    model, device = detectors.load_model(args.model)
+    if args.checkpoint:
+        if args.model != "aasist":
+            sys.exit("--checkpoint is only for --model aasist")
+        import aasist_io
+        model, device = aasist_io.load(args.checkpoint)
+    else:
+        model, device = detectors.load_model(args.model)
     rng = np.random.default_rng(args.seed)
     rows = []
     for i, (f, key) in enumerate(items):
