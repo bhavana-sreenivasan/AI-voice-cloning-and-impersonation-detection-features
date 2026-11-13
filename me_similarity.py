@@ -83,6 +83,23 @@ def main():
         print("Only trust that if the slices above it really are YOUR turns (listen to the file at those times).")
     print(f"\nIf almost everything is dropped at {speaker.MATCH_THRESHOLD:.2f}, that is why live_cli printed no scores.")
 
+def slice_label(segs, user, t0, t1):
+    """segs: [(start_s, end_s, speaker)]. 'user' / 'opponent' if exactly one speaker covers the whole slice, else None."""
+    who = set()
+    for s, e, spk in segs:
+        if s < t1 and e > t0:
+            if s > t0 or e < t1:        # the turn starts or ends inside the slice: not a clean slice
+                return None
+            who.add(spk == user)
+    if len(who) != 1:
+        return None
+    return "user" if next(iter(who)) else "opponent"
+
+
+def auc(pos, neg):
+    """Probability that a random 'pos' score is higher than a random 'neg' score (0.5 = no separation)."""
+    pos, neg = np.asarray(pos), np.asarray(neg)
+    return float((pos[:, None] > neg[None, :]).mean() + 0.5 * (pos[:, None] == neg[None, :]).mean())
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,10 @@ Findings these address (see silence_experiment.py / the CallHome runs):
   * the detectors read silence: real clips have long edges and many pauses, fakes are trimmed
         -> trim_edges + pad_random + no_pauses are applied to BOTH classes, so silence stops
            being a label
-  * the score moves with loudness                        -> random_gain
+  * the score moves with loudness (level_sweep.py: CallHome false alarms 3% -> 92% from -34 to -10 dB, and LA fakes
+    caught 12% -> 96%)                                   -> random_level: every clip is set to a RANDOM TARGET
+    level, so loudness carries no label and no corpus information (LA clips sit near -12 dB, calls near -26 dB;
+    a random relative gain would keep that ~13 dB gap)
   * phone audio (8 kHz, codec, noise, gating) is out of distribution -> phone_channel
 All functions take / return float32 mono 16 kHz arrays.  numpy + scipy only.
 """
@@ -18,7 +21,7 @@ N = 64600            # 4 s: the model input
 FR = 320             # 20 ms
 REL_QUIET_DB = 35.0
 
-DEFAULT_P = dict(trim=0.7, pad=0.7, nopause=0.2, phone=0.6, gain=0.9)
+DEFAULT_P = dict(trim=0.7, pad=0.7, nopause=0.2, phone=0.6, gain=1.0)   # 'gain' = probability of the random target level
 
 
 def _quiet(x):
@@ -63,6 +66,15 @@ def gain_db(x, g):
 
 def random_gain(x, rng, lo=-25.0, hi=10.0):
     return gain_db(x, rng.uniform(lo, hi))
+
+
+def random_level(x, rng, lo=-38.0, hi=-8.0):
+    """scale the clip so its 95th-percentile frame level is a random value in [lo, hi] dB (limited to +-45 dB of gain)."""
+    from levelnorm import p95_db
+    cur = p95_db(x)
+    if not np.isfinite(cur):
+        return x
+    return gain_db(x, float(np.clip(rng.uniform(lo, hi) - cur, -45.0, 45.0)))
 
 
 def phone8k(x):
@@ -110,7 +122,7 @@ def crop_or_tile(x, rng=None, n=N):
 
 
 def augment(x, rng, already_phone=False, p=None):
-    """silence equalisation -> phone channel -> gain -> 4 s crop.  Label-independent by design."""
+    """silence equalisation -> phone channel -> random target level -> 4 s crop.  Label-independent by design."""
     p = {**DEFAULT_P, **(p or {})}
     x = np.asarray(x, dtype=np.float32)
     orig = x
@@ -125,5 +137,5 @@ def augment(x, rng, already_phone=False, p=None):
     if not already_phone and rng.random() < p["phone"]:
         x = phone_channel(x, rng)
     if rng.random() < p["gain"]:
-        x = random_gain(x, rng)
+        x = random_level(x, rng)
     return np.ascontiguousarray(crop_or_tile(x, rng), dtype=np.float32)

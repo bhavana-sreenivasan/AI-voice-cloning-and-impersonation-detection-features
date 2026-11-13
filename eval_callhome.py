@@ -34,6 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 SR = 16000
+FIXED_THRESHOLDS = (0.25, 0.30, 0.35, 0.40, 0.45)
 
 
 def load_wav(path, max_s):
@@ -58,7 +59,7 @@ def run_analyzer(x, score, gate, smooth):
 
 
 def similarity_report(call_dir, idx, mix, segs_path, user, max_s):
-    """-> (auc, best_threshold, n_user, n_opp) for one call, or None if too few clean slices."""
+    """-> (auc, best_threshold, n_user, n_opp, user_sims, opp_sims) for one call, or None if too few clean slices."""
     import torch
     import speaker
     from me_similarity import auc, slice_label
@@ -81,7 +82,7 @@ def similarity_report(call_dir, idx, mix, segs_path, user, max_s):
         return None
     cand = np.unique(np.concatenate([gu, go]))
     bal, t = max((0.5 * (np.mean(gu >= t) + np.mean(go < t)), t) for t in cand)
-    return auc(gu, go), float(t), len(gu), len(go)
+    return auc(gu, go), float(t), len(gu), len(go), gu, go
 
 
 def main():
@@ -122,7 +123,10 @@ def main():
         return cache[key]
 
     rows = []
-    print(f"{'call':>5} {'input':<9}{'windows':>8}{'>0.5':>7}{'mean p':>8}{'alert (raw)':>13}{'alert (gate)':>14}{'gate flags':>12}")
+    import quality
+    from levelnorm import p95_db
+    print(f"{'call':>5} {'input':<9}{'windows':>8}{'>0.5':>7}{'mean p':>8}{'alert (raw)':>13}{'alert (gate)':>14}{'gate flags':>12}"
+          f"{'level dB':>10}{'4.5-7.5k vs 1-3.4k':>20}")
     for c in calls:
         for name in ("mix", "opponent"):
             path = os.path.join(args.dir, f"call{c:03d}_{name}.wav")
@@ -135,10 +139,12 @@ def main():
             gated = run_analyzer(x, score, True, args.smooth)
             r = {"call": c, "input": name, "windows": raw["n"], "frac_gt05": float(np.mean(raw["p"] > 0.5)),
                  "mean_p": float(np.mean(raw["p"])), "peak_p": float(np.max(raw["p"])),
-                 "alert_raw": raw["alert"], "alert_gate": gated["alert"], "gate_flags": gated["unrel"]}
+                 "alert_raw": raw["alert"], "alert_gate": gated["alert"], "gate_flags": gated["unrel"],
+                 "p95_db": p95_db(x), "hf_db": quality.hf_ratio_db(x)}
             rows.append(r)
             print(f"{c:>5} {name:<9}{r['windows']:>8}{100 * r['frac_gt05']:>6.0f}%{r['mean_p']:>8.2f}"
-                  f"{'ALERT' if r['alert_raw'] else '-':>13}{'ALERT' if r['alert_gate'] else '-':>14}{100 * r['gate_flags']:>11.0f}%", flush=True)
+                  f"{'ALERT' if r['alert_raw'] else '-':>13}{'ALERT' if r['alert_gate'] else '-':>14}{100 * r['gate_flags']:>11.0f}%"
+                  f"{r['p95_db']:>10.1f}{('n/a' if r['hf_db'] is None else format(r['hf_db'], '.1f')):>20}", flush=True)
 
     sim_rows = []
     if args.similarity:
@@ -154,9 +160,18 @@ def main():
             else:
                 print(f"  call{c:03d}: too few clean slices (or files missing)")
 
+    if sim_rows:
+        print("\none fixed --drop-above for every call (want both columns high; 'worst call' = lowest balanced accuracy):")
+        print(f"  {'threshold':>9} {'user slices dropped':>20} {'opponent slices kept':>22} {'worst call':>11}")
+        gu_all = np.concatenate([s[5] for s in sim_rows])
+        go_all = np.concatenate([s[6] for s in sim_rows])
+        for t in FIXED_THRESHOLDS:
+            worst = min(0.5 * (np.mean(s[5] >= t) + np.mean(s[6] < t)) for s in sim_rows)
+            print(f"  {t:9.2f} {100 * np.mean(gu_all >= t):19.0f}% {100 * np.mean(go_all < t):21.0f}% {100 * worst:10.0f}%")
+
     with open(args.csv, "w", newline="") as fh:
         if rows:
-            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()), restval="")
             w.writeheader()
             w.writerows(rows)
 
@@ -168,6 +183,15 @@ def main():
         print(f"{name:<9} {len(rr)} calls | windows scored fake: mean {100 * np.mean([r['frac_gt05'] for r in rr]):.0f}% "
               f"(range {100 * min(r['frac_gt05'] for r in rr):.0f}-{100 * max(r['frac_gt05'] for r in rr):.0f}%) | "
               f"calls with an alert: raw {sum(r['alert_raw'] for r in rr)}/{len(rr)}, with the gate {sum(r['alert_gate'] for r in rr)}/{len(rr)}")
+    mixr = [r for r in rows if r["input"] == "mix"]
+    if len(mixr) >= 4:
+        f = np.array([r["frac_gt05"] for r in mixr])
+        for key, label in (("p95_db", "level"), ("hf_db", "bandwidth")):
+            v = np.array([np.nan if r[key] is None else r[key] for r in mixr])
+            ok = ~np.isnan(v)
+            if ok.sum() >= 4 and v[ok].std() > 0 and f[ok].std() > 0:
+                print(f"across {int(ok.sum())} calls (mix): correlation of {label} with the share of windows scored fake "
+                      f"r = {np.corrcoef(v[ok], f[ok])[0, 1]:+.2f}  (few calls: only a hint)")
     if sim_rows:
         a = np.array([s[1] for s in sim_rows])
         t = np.array([s[2] for s in sim_rows])

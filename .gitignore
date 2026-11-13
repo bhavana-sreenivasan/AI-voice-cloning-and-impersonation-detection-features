@@ -31,3 +31,13 @@ pages/*.m4a
 *.log
 level_stats*.csv
 silence_experiment.csv
+callhome_out/
+pretrained_models/
+*.wav
+*.flac
+*.parquet
+*.pth
+*.pt
+*.ckpt
+__pycache__/
+.ipynb_checkpoints/

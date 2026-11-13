@@ -1,51 +1,40 @@
-"""Extract only a small random subset of ASVspoof 2019 LA eval from LA.zip.
-
-Usage (PowerShell):
-    python make_subset.py --zip C:\\path\\to\\LA.zip --out ..\\data\\LA --n 400
-
-Then run:
-    python eval.py --root ..\\data\\LA --n 400
-"""
-import argparse
-import os
+﻿import os
 import random
-import zipfile
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--zip", required=True)
-    ap.add_argument("--out", default="../data/LA")
-    ap.add_argument("--n", type=int, default=400)
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
-
-    z = zipfile.ZipFile(args.zip)
-    names = z.namelist()
-
-    proto_name = next(n for n in names if n.endswith("ASVspoof2019.LA.cm.eval.trl.txt"))
-    flac_index = {os.path.basename(n): n for n in names
-                  if "ASVspoof2019_LA_eval" in n and n.endswith(".flac")}
-
-    lines = [l for l in z.read(proto_name).decode().splitlines() if l.strip()]
-    random.Random(args.seed).shuffle(lines)
-    lines = [l for l in lines if (l.split()[1] + ".flac") in flac_index][: args.n]
-
-    proto_dir = os.path.join(args.out, "ASVspoof2019_LA_cm_protocols")
-    audio_dir = os.path.join(args.out, "ASVspoof2019_LA_eval", "flac")
-    os.makedirs(proto_dir, exist_ok=True)
-    os.makedirs(audio_dir, exist_ok=True)
-
-    with open(os.path.join(proto_dir, "ASVspoof2019.LA.cm.eval.trl.txt"), "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-    for l in lines:
-        fname = l.split()[1] + ".flac"
-        with open(os.path.join(audio_dir, fname), "wb") as out:
-            out.write(z.read(flac_index[fname]))
-
-    print(f"Done: {len(lines)} files extracted to {args.out}")
-
-
-if __name__ == "__main__":
-    main()
+import shutil
+audio_dir = r"C:\Users\bhavana s\Documents\Downloads\AI-voice-cloning-and-impersonation-detection-features-main\data\LA\ASVspoof2019_LA_train\flac"
+protocol = r"C:\Users\bhavana s\Documents\Downloads\AI-voice-cloning-and-impersonation-detection-features-main\SSL_Anti-spoofing-main\database\ASVspoof_LA_cm_protocols\ASVspoof2019.LA.cm.train.trn.txt"
+out = "colab_subset"
+out_audio = os.path.join(out, "flac")
+os.makedirs(out_audio, exist_ok=True)
+available = {
+    os.path.splitext(f)[0]
+    for f in os.listdir(audio_dir)
+    if f.lower().endswith(".flac")
+}
+groups = {"bonafide": [], "spoof": []}
+with open(protocol, "r") as f:
+    for line in f:
+        parts = line.split()
+        if len(parts) >= 5:
+            file_id = parts[1]
+            label = parts[-1]
+            if label in groups and file_id in available:
+                groups[label].append((file_id, line))
+random.seed(42)
+selected = []
+for label in ("bonafide", "spoof"):
+    items = groups[label]
+    print(label, "available:", len(items))
+    selected.extend(random.sample(items, 200))
+with open(os.path.join(out, "subset_protocol.txt"), "w") as f:
+    for file_id, line in selected:
+        shutil.copy2(
+            os.path.join(audio_dir, file_id + ".flac"),
+            os.path.join(out_audio, file_id + ".flac")
+        )
+        f.write(line)
+print("\nSubset created successfully!")
+print("Bonafide: 200")
+print("Spoof: 200")
+print("Total: 400")
+print("Location:", os.path.abspath(out))

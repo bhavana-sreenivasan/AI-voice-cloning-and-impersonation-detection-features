@@ -24,13 +24,19 @@ import os
 import librosa
 import numpy as np
 import torch
-
+from speechbrain.utils.fetching import LocalStrategy
 SR = 16000
 WIN_S, HOP_S = 4.0, 1.0          # same windowing as the spoof pipeline
 MIN_S = 1.0                      # shorter inputs are tiled up to this length
 
 BACKEND = os.environ.get("SPEAKER_BACKEND", "ecapa2").lower()
-DEVICE = os.environ.get("SPEAKER_DEVICE", "cpu")
+DEVICE = os.environ.get("SPEAKER_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+# TorchScript's profiling executor can take minutes on the first call (and on each new input length)
+try:
+    torch._C._jit_set_profiling_executor(False)
+    torch._C._jit_set_profiling_mode(False)
+except AttributeError:      # very old / very new torch without these switches
+    pass
 if BACKEND not in ("ecapa2", "speechbrain"):
     raise ValueError("SPEAKER_BACKEND must be 'ecapa2' or 'speechbrain', got " + BACKEND)
 EMB_MODEL = BACKEND
@@ -66,8 +72,9 @@ def _load_speechbrain():
     return EncoderClassifier.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir="pretrained_models/spkrec-ecapa-voxceleb",
-        run_opts={"device": DEVICE},
-    )
+        run_opts={"device": "cpu"},
+        local_strategy=LocalStrategy.COPY,
+)
 
 
 def _get_model():
@@ -89,6 +96,11 @@ def embed(wav):
     n = int(MIN_S * SR)
     if len(wav) < n:                                  # very short windows: tile up
         wav = wav.repeat(int(np.ceil(n / max(len(wav), 1))))[:n]
+        MAX_S = 60.0
+        max_n = int(MAX_S * SR)
+        if len(wav) > max_n:                              # very long input: use the middle part
+            a = (len(wav) - max_n) // 2
+            wav = wav[a:a + max_n]
     x = wav.unsqueeze(0).to(DEVICE)                   # (1, samples)
     with torch.no_grad():
         if BACKEND == "ecapa2":

@@ -208,7 +208,7 @@ class SessionVoiceTracker:
 
 class LiveAnalyzer:
     def __init__(self, score_fn, ident_fn=None, sr=SR, win_s=4.0, hop_s=1.0, min_s=2.0,
-        low=0.30, high=0.70, consec=3, gate=None, smooth=1, check_quality=False):
+        low=0.30, high=0.70, consec=3, gate=None, smooth=1, check_quality=False, quality_windows=15):
         self.score_fn, self.ident_fn, self.gate = score_fn, ident_fn, gate
         self.sr, self.win, self.hop, self.min = sr, int(win_s * sr), int(hop_s * sr), int(min_s * sr)
         self.low, self.high, self.consec = low, high, consec
@@ -221,6 +221,7 @@ class LiveAnalyzer:
         self.recent = deque(maxlen=max(1, smooth))
         self.history = []
         self.check_quality = check_quality   # True: narrowband audio never raises an alert (see quality.py)
+        self._hf_hist = deque(maxlen=max(1, quality_windows))   # recent bandwidth readings: the call's channel is decided on their median
         
 
     def push(self, samples):
@@ -250,7 +251,11 @@ class LiveAnalyzer:
         unreliable = False
         if self.check_quality:
             import quality
-            unreliable = bool(quality.check(window, self.sr)["narrowband"])
+            hf = quality.hf_ratio_db(window, self.sr)
+            if hf is not None:
+                self._hf_hist.append(hf)
+            # median of the recent windows: one spliced / odd window cannot flip the call's channel
+            unreliable = bool(self._hf_hist) and float(np.median(self._hf_hist)) < quality.NARROWBAND_DB
         self.streak = self.streak + 1 if (p > self.high and not unreliable) else 0
         new_alert = False
         if self.streak >= self.consec and not self.alert_active:

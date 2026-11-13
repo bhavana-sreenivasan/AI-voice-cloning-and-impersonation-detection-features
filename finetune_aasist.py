@@ -3,17 +3,23 @@
 What it trains on
   * ASVspoof 2019 LA train clips (ids LA_T_*), both classes, balanced 50/50 per batch
   * optional: real phone speech from CallHome (callhome_out/callNNN_mix.wav, made by callhome_extract.py)
-    as extra BONAFIDE examples, so natural pauses + phone audio are not 'fake'.  The LAST --ch-holdout
-    fraction of the calls is never trained on: it is the held-out false-alarm test.
+    as extra BONAFIDE examples, so natural pauses + phone audio are not 'fake'.  The calls (sorted by name) are
+    split: first = training, then --ch-holdout (default 20%) = used to CHOOSE the checkpoint, and the very last
+    --ch-test (default 20%, needs >= 4 calls) = TEST calls that are never used for training or for choosing, with
+    a final false-alarm report on them (final_test.txt).
 How the shortcuts are attacked (augment.py): every sample, whatever its label, gets random edge
 trimming + random noise padding + sometimes pause removal (silence stops being a label), a random
-gain of -25..+10 dB, and with p=0.6 a telephone chain (8 kHz, noise, band-pass, mu-law, gating).
+TARGET level (95th-percentile frame level uniform in -38..-8 dB, so loudness carries neither the label nor
+the corpus: LA clips are ~13 dB louder than the calls), and with p=0.6 a telephone chain (8 kHz, noise,
+band-pass, mu-law, gating).
 
 What it prints / saves (in --out):
   metrics.csv   per epoch: train loss, EER under asis / no_pauses / pad_edges / phone8k / gain-12 dB
                 on validation clips, false-alarm rate on the held-out CallHome calls, selection score
   baseline row  epoch 0 = the pretrained weights, so you can compare before / after
   best.pth      lowest selection score = mean(EER of the 5 conditions) + 0.5 * CallHome false-alarm rate
+                + 0.5 * (1 - share of validation FAKES still caught at the 0.5 threshold, averaged over the 5 conditions)
+                (the last term stops a model from "winning" just by becoming reluctant to say fake)
   last.pth      the final epoch
 Load a result anywhere with aasist_io.load("finetune_out/best.pth").
 
@@ -85,12 +91,23 @@ def split_la(items, val_per_class, seed):
 
 
 class CallhomeCalls:
-    def __init__(self, directory, holdout):
+    """Calls sorted by name: the first are TRAINING calls, then the SELECTION calls (used to choose the checkpoint),
+    and the LAST ones are TEST calls, which are never used for training nor for choosing the checkpoint."""
+
+    def __init__(self, directory, holdout, test=0.0):
         paths = sorted(glob.glob(os.path.join(directory, "call*_mix.wav")))
         self.all = [(p, sf.info(p).frames) for p in paths]
-        k = int(np.ceil(holdout * len(self.all))) if len(self.all) >= 3 else 0
-        self.train = self.all[: len(self.all) - k]
-        self.held = self.all[len(self.all) - k:]
+        n = len(self.all)
+        k_val = int(np.ceil(holdout * n)) if n >= 3 else 0
+        k_test = int(np.ceil(test * n)) if n >= 4 else 0
+        while k_val + k_test > n - 1:                      # always keep at least one training call
+            if k_val >= k_test:
+                k_val -= 1
+            else:
+                k_test -= 1
+        self.train = self.all[: n - k_val - k_test]
+        self.held = self.all[n - k_val - k_test: n - k_test]
+        self.test = self.all[n - k_test:] if k_test else []
 
     def crop(self, rng):
         path, n = self.train[int(rng.integers(len(self.train)))]
@@ -163,13 +180,22 @@ def load_val(val):
 
 def evaluate(model, dev, val_arrs, val_labs, held_calls, max_s=120.0, hop_s=2.0):
     res = {}
+    caught, flagged = [], []
     for name, fn in VAL_CONDITIONS.items():
         rng = np.random.default_rng(0)
         ys = []
         for x in val_arrs:
             y = fn(x, rng)
             ys.append(y if len(y) >= SR // 4 else x)
-        res["EER_" + name] = 100 * compute_eer(val_labs, 1.0 - p_spoof(model, dev, ys))
+        p = p_spoof(model, dev, ys)
+        e = compute_eer(val_labs, 1.0 - p)                       # float, or (eer, threshold) in older copies
+        res["EER_" + name] = 100 * (e[0] if isinstance(e, tuple) else e)
+        res["caught_" + name] = 100 * float(np.mean(p[val_labs == 0] > 0.5)) if (val_labs == 0).any() else float("nan")
+        res["realflag_" + name] = 100 * float(np.mean(p[val_labs == 1] > 0.5)) if (val_labs == 1).any() else float("nan")
+        caught.append(res["caught_" + name])
+        flagged.append(res["realflag_" + name])
+    res["caught_mean"] = float(np.nanmean(caught))
+    res["realflag_mean"] = float(np.nanmean(flagged))
     ps = []
     for path, n in held_calls:
         x, _ = sf.read(path, frames=int(max_s * SR), dtype="float32", always_2d=True)
@@ -180,12 +206,27 @@ def evaluate(model, dev, val_arrs, val_labs, held_calls, max_s=120.0, hop_s=2.0)
         res["callhome_FA%"] = 100 * float(np.mean(ps > 0.5))
         res["callhome_mean_p"] = float(np.mean(ps))
     eers = [v for k, v in res.items() if k.startswith("EER_")]
-    res["select"] = float(np.mean(eers) / 100 + 0.5 * res.get("callhome_FA%", 0.0) / 100)
+    res["select"] = float(np.mean(eers) / 100 + 0.5 * res.get("callhome_FA%", 0.0) / 100
+                          + 0.5 * (1.0 - res["caught_mean"] / 100 if np.isfinite(res["caught_mean"]) else 0.0))
     return res
 
 
+def call_fa(model, dev, calls, max_s=120.0, hop_s=2.0):
+    """share of 4 s windows scored fake over real calls (every one is a false alarm), mean p, number of windows."""
+    ps = []
+    for path, n in calls:
+        x, _ = sf.read(path, frames=int(max_s * SR), dtype="float32", always_2d=True)
+        x = x.mean(axis=1)
+        ps += list(p_spoof(model, dev, [x[s:s + N] for s in range(0, max(1, len(x) - N + 1), int(hop_s * SR))]))
+    if not ps:
+        return None
+    ps = np.array(ps)
+    return 100 * float(np.mean(ps > 0.5)), float(np.mean(ps)), len(ps)
+
+
 def fmt(res):
-    return "  ".join(f"{k}={v:.1f}" if k != "select" and k != "callhome_mean_p" else f"{k}={v:.3f}" for k, v in res.items())
+    keep = [k for k in res if k.startswith("EER_") or k in ("caught_mean", "realflag_mean", "callhome_FA%", "callhome_mean_p", "select")]
+    return "  ".join(f"{k}={res[k]:.3f}" if k in ("select", "callhome_mean_p") else f"{k}={res[k]:.1f}" for k in keep)
 
 
 # ----------------------------------------------------------------------------- main
@@ -194,7 +235,9 @@ def main():
     ap.add_argument("--la-root", required=True, help="folder searched recursively for ASVspoof 2019 LA flac files + protocols")
     ap.add_argument("--protocol", action="append", default=[], help="extra protocol .txt (e.g. the train protocol), repeatable")
     ap.add_argument("--callhome-dir", help="folder with callNNN_mix.wav (from callhome_extract.py)")
-    ap.add_argument("--ch-holdout", type=float, default=0.3, help="fraction of CallHome calls (the last ones) held out")
+    ap.add_argument("--ch-holdout", type=float, default=0.2, help="fraction of CallHome calls used to CHOOSE the checkpoint")
+    ap.add_argument("--ch-test", type=float, default=0.2, help="fraction of CallHome calls (the very last ones) kept as a TEST set: "
+                    "never used for training nor for choosing the checkpoint (needs >= 4 calls)")
     ap.add_argument("--ch-frac", type=float, default=0.25, help="share of bonafide samples taken from CallHome")
     ap.add_argument("--init", help="checkpoint to start from (default: pretrained AASIST.pth)")
     ap.add_argument("--epochs", type=int, default=3)
@@ -206,6 +249,7 @@ def main():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--skip-baseline", action="store_true")
+    ap.add_argument("--freeze-bn", action="store_true", help="keep BatchNorm statistics fixed (steadier on a small dataset)")
     ap.add_argument("--out", default="finetune_out")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -223,10 +267,14 @@ def main():
                  "pass the train protocol with --protocol (ASVspoof2019.LA.cm.train.trn.txt).")
     calls = None
     if args.callhome_dir:
-        calls = CallhomeCalls(args.callhome_dir, args.ch_holdout)
-        print(f"CallHome: {len(calls.all)} calls -> {len(calls.train)} for training, {len(calls.held)} held out")
+        calls = CallhomeCalls(args.callhome_dir, args.ch_holdout, args.ch_test)
         if not calls.all:
             sys.exit("No callNNN_mix.wav files found in --callhome-dir")
+        nm = lambda cs: ", ".join(os.path.basename(p).split("_")[0] for p, _ in cs) or "none"   # noqa: E731
+        print(f"CallHome: {len(calls.all)} calls | training: {nm(calls.train)} | used to choose the checkpoint: {nm(calls.held)} "
+              f"| TEST (never used for either): {nm(calls.test)}")
+        if not calls.test:
+            print("  (fewer than 4 calls: no separate test set. Convert more calls with callhome_extract.py.)")
 
     model, _ = aasist_io.load(args.init, dev, train=True)
     val_arrs, val_labs = load_val(val)
@@ -252,6 +300,7 @@ def main():
         record(0, float("nan"), res)
         best = res["select"]
 
+    start_test = call_fa(model, dev, calls.test) if (calls and calls.test) else None
     ds = MixDataset(train, calls, args.steps_per_epoch * args.batch_size, args.seed, args.ch_frac)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     total = args.epochs * args.steps_per_epoch
@@ -261,6 +310,10 @@ def main():
         ds.set_epoch(epoch)
         dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
         model.train()
+        if args.freeze_bn:
+            for m in model.modules():
+                if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
+                    m.eval()
         t0, losses = time.time(), []
         for xb, yb in dl:
             out = model(xb.to(dev))
@@ -287,6 +340,21 @@ def main():
         print("No epoch beat the pretrained weights on the selection score: best.pth was NOT written; "
               "the pretrained model stays the best. last.pth is the final epoch for inspection.")
     print(f"\nMetrics: {os.path.join(args.out, 'metrics.csv')}")
+    if start_test is not None:
+        final_path = os.path.join(args.out, "best.pth")
+        which = "best.pth"
+        if not os.path.isfile(final_path):
+            final_path, which = os.path.join(args.out, "last.pth"), "last.pth (best.pth was not written)"
+        fmodel, _ = aasist_io.load(final_path, dev)
+        end_test = call_fa(fmodel, dev, calls.test)
+        msg = (f"FINAL TEST on {nm(calls.test)} (never used for training or for choosing the checkpoint; all real audio):\n"
+               f"  windows scored fake: start {start_test[0]:.1f}% (mean p {start_test[1]:.2f})  ->  {which} {end_test[0]:.1f}% "
+               f"(mean p {end_test[1]:.2f})   [{end_test[2]} windows]\n"
+               "  This says nothing about FAKE calls. Check those with silence_experiment.py / level_sweep.py --checkpoint "
+               "(unseen LA attacks) and with fakes sent through WhatsApp.")
+        print("\n" + msg)
+        with open(os.path.join(args.out, "final_test.txt"), "w") as fh:
+            fh.write(msg + "\n")
 
 
 if __name__ == "__main__":

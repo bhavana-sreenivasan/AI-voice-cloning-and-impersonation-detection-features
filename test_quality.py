@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import numpy as np
-import tests.quality as quality
+import quality
 from live import LiveAnalyzer
 
 SR = 16000
@@ -75,6 +75,30 @@ def test_fuse_risk_ignores_unreliable_spoof_but_keeps_identity_signals():
     assert fuse_risk("High", "mismatch", spoof_unreliable=True)[0] == "High"
     assert fuse_risk("Low", None, True, spoof_unreliable=True)[0] == "High"     # speaker change
     assert fuse_risk("High")[0] == "High" and fuse_risk("Low")[0] == "Low"      # unchanged by default
+
+
+def _an(x, **kw):
+    an = LiveAnalyzer(lambda w: 0.95, min_s=1.0, hop_s=1.0, consec=3, check_quality=True, **kw)
+    for i in range(0, len(x), SR // 2):
+        an.push(x[i:i + SR // 2])
+    return an
+
+
+def test_gate_decides_per_call_not_per_window():
+    nb = narrowband(30)
+    burst = wideband(2, seed=5)                                   # 2 s of wideband audio spliced into a phone call
+    x = np.concatenate([nb[:10 * SR], burst, nb[10 * SR:]])
+    assert any(e["new_alert"] for e in _an(x, quality_windows=1).history)      # per-window gate: a few windows leak through
+    an = _an(x)                                                   # default: median of the last 15 windows
+    assert not any(e["new_alert"] for e in an.history)
+    assert all(e["unreliable"] for e in an.history)
+
+
+def test_gate_still_lets_wideband_alert_and_follows_a_channel_change():
+    assert any(e["new_alert"] for e in _an(wideband(20)).history)
+    x = np.concatenate([wideband(25, 1), narrowband(40, 2)])      # wideband call, then it turns into phone audio
+    ev = _an(x).history
+    assert not ev[3]["unreliable"] and ev[-1]["unreliable"]
 
 
 if __name__ == "__main__":
